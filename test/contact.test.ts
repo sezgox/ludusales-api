@@ -18,8 +18,10 @@ describe('contact endpoint', () => {
     await expect(response.json()).resolves.toEqual({ error: 'Invalid contact payload.' });
   });
 
-  it('sends valid contact payloads through Resend', async () => {
-    const resendFetch = vi.fn(async () => new Response(JSON.stringify({ id: 'email-id' }), { status: 200 }));
+  it('sends valid contact payloads to the owner and the requester through Resend', async () => {
+    const resendFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(JSON.stringify({ id: 'email-id' }), { status: 200 }),
+    );
     vi.stubGlobal('fetch', resendFetch);
 
     const response = await app.request(
@@ -48,6 +50,7 @@ describe('contact endpoint', () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
+    expect(resendFetch).toHaveBeenCalledTimes(2);
     expect(resendFetch).toHaveBeenCalledWith(
       'https://api.resend.com/emails',
       expect.objectContaining({
@@ -57,6 +60,30 @@ describe('contact endpoint', () => {
           'Content-Type': 'application/json',
         }),
       }),
+    );
+    const requestBodies = resendFetch.mock.calls.map((call) => {
+      const init = call[1];
+
+      if (!init?.body) {
+        throw new Error('Expected Resend request body');
+      }
+
+      return JSON.parse(String(init.body));
+    });
+
+    expect(requestBodies).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          to: ['juanma@ludusales.com'],
+          reply_to: 'codex-test@example.com',
+          subject: 'Nueva solicitud de llamada - Ludus Sales Test',
+        }),
+        expect.objectContaining({
+          to: ['codex-test@example.com'],
+          reply_to: 'juanma@ludusales.com',
+          subject: 'Hemos recibido tu solicitud en Ludus Sales',
+        }),
+      ]),
     );
   });
 });

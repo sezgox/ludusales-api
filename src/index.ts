@@ -56,19 +56,13 @@ app.post('/contact', async (c) => {
     return c.json({ error: 'Email service is not configured.' }, 500);
   }
 
-  const emailBody = buildEmailBody(payload.value, c.env);
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${c.env.RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(emailBody),
-  });
+  const emailBodies = [buildContactNotificationEmail(payload.value, c.env), buildContactConfirmationEmail(payload.value, c.env)];
+  const responses = await Promise.all(emailBodies.map((emailBody) => sendResendEmail(emailBody, c.env.RESEND_API_KEY)));
+  const failedResponse = responses.find((response) => !response.ok);
 
-  if (!response.ok) {
-    const message = await response.text();
-    console.error('Resend API error', response.status, message);
+  if (failedResponse) {
+    const message = await failedResponse.text();
+    console.error('Resend API error', failedResponse.status, message);
     return c.json({ error: 'Unable to send contact email.' }, 502);
   }
 
@@ -113,7 +107,17 @@ const parseContactPayload = (body: unknown): ContactPayload | null => {
   return { firstName, lastName, email, company, teamSize };
 };
 
-const buildEmailBody = (payload: ContactPayload, env: Env): ResendEmailBody => {
+const sendResendEmail = (emailBody: ResendEmailBody, apiKey: string): Promise<Response> =>
+  fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(emailBody),
+  });
+
+const buildContactNotificationEmail = (payload: ContactPayload, env: Env): ResendEmailBody => {
   const toEmail = env.CONTACT_TO_EMAIL ?? 'juanma@ludusales.com';
   const fromEmail = env.RESEND_FROM_EMAIL ?? 'Ludus Sales <contact@ludusales.com>';
   const subject = `Nueva solicitud de llamada - ${payload.company}`;
@@ -144,6 +148,48 @@ const buildEmailBody = (payload: ContactPayload, env: Env): ResendEmailBody => {
     from: fromEmail,
     to: [toEmail],
     reply_to: payload.email,
+    subject,
+    text,
+    html,
+  };
+};
+
+const buildContactConfirmationEmail = (payload: ContactPayload, env: Env): ResendEmailBody => {
+  const contactEmail = env.CONTACT_TO_EMAIL ?? 'juanma@ludusales.com';
+  const fromEmail = env.RESEND_FROM_EMAIL ?? 'Ludus Sales <contact@ludusales.com>';
+  const firstName = payload.firstName;
+  const subject = 'Hemos recibido tu solicitud en Ludus Sales';
+  const text = [
+    `Hola ${firstName},`,
+    '',
+    'Hemos recibido tu solicitud para agendar una llamada con Ludus Sales.',
+    'Revisaremos la informacion y te responderemos pronto.',
+    '',
+    'Resumen de tu solicitud:',
+    `Empresa: ${payload.company}`,
+    `Tamano del equipo de ventas: ${payload.teamSize}`,
+    '',
+    'Gracias,',
+    'Ludus Sales',
+  ].join('\n');
+  const html = `
+    <p>Hola ${escapeHtml(firstName)},</p>
+    <p>Hemos recibido tu solicitud para agendar una llamada con Ludus Sales.</p>
+    <p>Revisaremos la informacion y te responderemos pronto.</p>
+    <h2>Resumen de tu solicitud</h2>
+    <dl>
+      <dt>Empresa</dt>
+      <dd>${escapeHtml(payload.company)}</dd>
+      <dt>Tamano del equipo de ventas</dt>
+      <dd>${escapeHtml(payload.teamSize)}</dd>
+    </dl>
+    <p>Gracias,<br />Ludus Sales</p>
+  `;
+
+  return {
+    from: fromEmail,
+    to: [payload.email],
+    reply_to: contactEmail,
     subject,
     text,
     html,

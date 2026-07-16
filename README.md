@@ -8,12 +8,15 @@ El Worker se despliega como `ludusales-api`.
 
 `POST /contact`
 
-Envía a Resend los datos del formulario de contacto del frontend.
+Envia dos correos con Resend:
+
+- Un correo interno a `CONTACT_TO_EMAIL` con los datos del formulario.
+- Un correo de confirmacion al email que ha rellenado el usuario.
 
 ```json
 {
   "firstName": "Juan",
-  "lastName": "Pérez",
+  "lastName": "Perez",
   "email": "juan@example.com",
   "company": "Acme",
   "teamSize": "12"
@@ -28,7 +31,7 @@ Envía a Resend los datos del formulario de contacto del frontend.
 npm install
 ```
 
-2. Crea `.dev.vars` usando `.env.example` como base y añade `RESEND_API_KEY`.
+2. Crea `.dev.vars` usando `.env.example` como base y anade `RESEND_API_KEY`.
 
 3. Arranca el Worker:
 
@@ -46,15 +49,21 @@ Guarda la API key como secreto de Cloudflare:
 npx wrangler secret put RESEND_API_KEY
 ```
 
-Después despliega manualmente:
+Despues despliega manualmente:
 
 ```bash
 npm run deploy
 ```
 
-También hay un workflow de GitHub Actions en `.github/workflows/deploy.yml`. Para usarlo, configura estos secretos del repositorio:
+Tambien hay un workflow de GitHub Actions en `.github/workflows/deploy.yml`. Para usarlo, configura estos secretos del repositorio:
 
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 
-`RESEND_FROM_EMAIL` debe pertenecer a un dominio verificado en Resend para producción.
+`RESEND_API_KEY` es obligatorio en el Worker desplegado. Si falta, `/contact` responde:
+
+```json
+{ "error": "Email service is not configured." }
+```
+
+`RESEND_FROM_EMAIL` debe pertenecer a un dominio verificado en Resend para produccion.
