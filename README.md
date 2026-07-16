@@ -46,10 +46,15 @@ Guarda la API key como secreto de Cloudflare:
 npx wrangler secret put RESEND_API_KEY
 ```
 
-Después despliega:
+Después despliega manualmente:
 
 ```bash
 npm run deploy
 ```
+
+También hay un workflow de GitHub Actions en `.github/workflows/deploy.yml`. Para usarlo, configura estos secretos del repositorio:
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
 
 `RESEND_FROM_EMAIL` debe pertenecer a un dominio verificado en Resend para producción.
