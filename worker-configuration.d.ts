@@ -1,7 +1,16 @@
 interface Env {
+  DB?: D1Database;
   RESEND_API_KEY: string;
   CONTACT_TO_EMAIL?: string;
   RESEND_FROM_EMAIL?: string;
   FRONTEND_ORIGINS?: string;
+  FRONTEND_BACKOFFICE_URL?: string;
+  MICROSOFT_CLIENT_ID: string;
+  MICROSOFT_CLIENT_SECRET: string;
+  MICROSOFT_REDIRECT_URI: string;
+  MICROSOFT_TENANT?: string;
+  SESSION_SECRET: string;
+  TOKEN_ENCRYPTION_KEY: string;
+  OWNER_MICROSOFT_EMAIL?: string;
+  OWNER_PUBLIC_EMAIL?: string;
 }
-
