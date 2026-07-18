@@ -1,15 +1,14 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "ludusales-api",
+  "name": "ludusales-api-test",
   "main": "src/index.ts",
   "compatibility_date": "2025-12-10",
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "ludusales-backoffice",
-      "database_id": "79da28b5-028d-4266-83da-596dfebdc499",
-      "migrations_dir": "migrations",
-      "remote": true
+      "database_name": "ludusales-backoffice-test",
+      "database_id": "test-db",
+      "migrations_dir": "migrations"
     }
   ],
   "vars": {
