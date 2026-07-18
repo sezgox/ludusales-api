@@ -565,19 +565,21 @@ const buildContactNotificationEmail = (payload: ContactPayload, env: Env): Resen
     `Tamano del equipo de ventas: ${payload.teamSize}`,
   ].join('\n');
   const html = `
-    <h1>Nueva solicitud de llamada</h1>
-    <p>Han completado el formulario de contacto en ludusales.com.</p>
-    <dl>
-      <dt>Nombre</dt>
-      <dd>${escapeHtml(`${payload.firstName} ${payload.lastName}`)}</dd>
-      <dt>Email</dt>
-      <dd>${escapeHtml(payload.email)}</dd>
-      <dt>Empresa</dt>
-      <dd>${escapeHtml(payload.company)}</dd>
-      <dt>Tamano del equipo de ventas</dt>
-      <dd>${escapeHtml(payload.teamSize)}</dd>
-    </dl>
-  `;
+${buildEmailShell({
+  preview: `Nueva solicitud de ${payload.firstName} ${payload.lastName} desde ludusales.com`,
+  eyebrow: 'Nueva solicitud',
+  title: `${payload.firstName} ${payload.lastName} quiere hablar con Ludus Sales`,
+  lead: 'Han completado el formulario de contacto. Responde directamente a este correo para continuar la conversacion.',
+  content: `
+    ${buildEmailDetailTable([
+      ['Nombre', `${payload.firstName} ${payload.lastName}`],
+      ['Email', payload.email],
+      ['Empresa', payload.company],
+      ['Tamano del equipo de ventas', payload.teamSize],
+    ])}
+    ${buildEmailButton('Responder al lead', buildMailtoHref(payload.email, `Re: ${subject}`))}
+  `,
+})}`;
 
   return {
     from: fromEmail,
@@ -608,18 +610,21 @@ const buildContactConfirmationEmail = (payload: ContactPayload, env: Env): Resen
     'Ludus Sales',
   ].join('\n');
   const html = `
-    <p>Hola ${escapeHtml(firstName)},</p>
-    <p>Hemos recibido tu solicitud para agendar una llamada con Ludus Sales.</p>
-    <p>Revisaremos la informacion y te responderemos pronto.</p>
-    <h2>Resumen de tu solicitud</h2>
-    <dl>
-      <dt>Empresa</dt>
-      <dd>${escapeHtml(payload.company)}</dd>
-      <dt>Tamano del equipo de ventas</dt>
-      <dd>${escapeHtml(payload.teamSize)}</dd>
-    </dl>
-    <p>Gracias,<br />Ludus Sales</p>
-  `;
+${buildEmailShell({
+  preview: 'Hemos recibido tu solicitud para agendar una llamada con Ludus Sales.',
+  eyebrow: 'Solicitud recibida',
+  title: `Hola ${firstName}, ya tenemos tu solicitud`,
+  lead: 'Gracias por contactar con Ludus Sales. Revisaremos la informacion y te responderemos pronto para coordinar los siguientes pasos.',
+  content: `
+    ${buildEmailDetailTable([
+      ['Empresa', payload.company],
+      ['Tamano del equipo de ventas', payload.teamSize],
+    ])}
+    <p style="margin:24px 0 0;color:#4a5565;font-size:15px;line-height:1.6;">
+      Mientras tanto, puedes responder a este mismo correo si quieres anadir algun detalle antes de la llamada.
+    </p>
+  `,
+})}`;
 
   return {
     from: fromEmail,
@@ -630,6 +635,90 @@ const buildContactConfirmationEmail = (payload: ContactPayload, env: Env): Resen
     html,
   };
 };
+
+const buildEmailShell = ({
+  preview,
+  eyebrow,
+  title,
+  lead,
+  content,
+}: {
+  preview: string;
+  eyebrow: string;
+  title: string;
+  lead: string;
+  content: string;
+}): string => `
+  <div style="display:none;max-height:0;overflow:hidden;color:transparent;opacity:0;">
+    ${escapeHtml(preview)}
+  </div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:0;padding:0;background-color:#f6f8f4;">
+    <tr>
+      <td align="center" style="padding:32px 16px;">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background-color:#ffffff;border:1px solid #dce4d8;border-radius:8px;overflow:hidden;font-family:Inter,Segoe UI,Arial,sans-serif;">
+          <tr>
+            <td style="padding:28px 32px;background-color:#1e5125;background-image:linear-gradient(135deg,#1e5125 0%,#278537 100%);">
+              <p style="margin:0 0 10px;color:#ffb900;font-size:12px;font-weight:800;letter-spacing:0;text-transform:uppercase;">
+                ${escapeHtml(eyebrow)}
+              </p>
+              <h1 style="margin:0;color:#ffffff;font-size:28px;line-height:1.16;font-weight:800;">
+                ${escapeHtml(title)}
+              </h1>
+              <p style="margin:16px 0 0;color:#e8f4e3;font-size:16px;line-height:1.6;">
+                ${escapeHtml(lead)}
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:30px 32px;">
+              ${content}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:18px 32px;background-color:#edf2ea;border-top:1px solid #dce4d8;">
+              <p style="margin:0;color:#657467;font-size:13px;line-height:1.5;">
+                Ludus Sales - Automatizacion comercial para equipos que venden mejor.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+`;
+
+const buildEmailDetailTable = (rows: [string, string][]): string => `
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #dce4d8;border-radius:8px;overflow:hidden;">
+    ${rows
+      .map(
+        ([label, value]) => `
+          <tr>
+            <td style="width:38%;padding:14px 16px;background-color:#f8faf6;border-bottom:1px solid #e6ece2;color:#1e5125;font-size:13px;font-weight:800;text-transform:uppercase;">
+              ${escapeHtml(label)}
+            </td>
+            <td style="padding:14px 16px;border-bottom:1px solid #e6ece2;color:#142018;font-size:15px;font-weight:700;">
+              ${escapeHtml(value)}
+            </td>
+          </tr>
+        `,
+      )
+      .join('')}
+  </table>
+`;
+
+const buildEmailButton = (label: string, href: string): string => `
+  <table role="presentation" cellspacing="0" cellpadding="0" style="margin-top:24px;">
+    <tr>
+      <td style="border-radius:8px;background-color:#ffb900;">
+        <a href="${escapeHtml(href)}" style="display:inline-block;padding:13px 18px;color:#1e5125;font-size:15px;font-weight:800;text-decoration:none;">
+          ${escapeHtml(label)}
+        </a>
+      </td>
+    </tr>
+  </table>
+`;
+
+const buildMailtoHref = (email: string, subject: string): string => `mailto:${email}?subject=${encodeURIComponent(subject)}`;
 
 const readRequiredString = (record: Record<string, unknown>, key: string, maxLength: number): string | null => {
   const value = record[key];
