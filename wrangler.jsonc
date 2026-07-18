@@ -9,7 +9,6 @@
       "database_name": "ludusales-backoffice",
       "database_id": "79da28b5-028d-4266-83da-596dfebdc499",
       "migrations_dir": "migrations",
-      "remote": true
     }
   ],
   "vars": {
