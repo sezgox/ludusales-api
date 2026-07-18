@@ -4,9 +4,8 @@ export default defineWorkersConfig({
   test: {
     poolOptions: {
       workers: {
-        wrangler: { configPath: './wrangler.jsonc' },
+        wrangler: { configPath: './wrangler.test.jsonc' },
       },
     },
   },
 });
-
