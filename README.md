@@ -55,11 +55,6 @@ Despues despliega manualmente:
 npm run deploy
 ```
 
-Tambien hay un workflow de GitHub Actions en `.github/workflows/deploy.yml`. Para usarlo, configura estos secretos del repositorio:
-
-- `CLOUDFLARE_API_TOKEN`
-- `CLOUDFLARE_ACCOUNT_ID`
-
 `RESEND_API_KEY` es obligatorio en el Worker desplegado. Si falta, `/contact` responde:
 
 ```json
