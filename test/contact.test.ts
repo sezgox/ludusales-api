@@ -42,7 +42,7 @@ describe('contact endpoint', () => {
       },
       {
         RESEND_API_KEY: 'test-key',
-        CONTACT_TO_EMAIL: 'juanma@ludusales.com',
+        CONTACT_TO_EMAIL: 'juan.mateo@ludusales.com',
         RESEND_FROM_EMAIL: 'Ludus Sales <contact@ludusales.com>',
         FRONTEND_ORIGINS: 'http://localhost:4200',
       },
@@ -74,13 +74,13 @@ describe('contact endpoint', () => {
     expect(requestBodies).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          to: ['juanma@ludusales.com'],
+          to: ['juan.mateo@ludusales.com'],
           reply_to: 'codex-test@example.com',
           subject: 'Nueva solicitud de llamada - Ludus Sales Test',
         }),
         expect.objectContaining({
           to: ['codex-test@example.com'],
-          reply_to: 'juanma@ludusales.com',
+          reply_to: 'juan.mateo@ludusales.com',
           subject: 'Hemos recibido tu solicitud en Ludus Sales',
         }),
       ]),
