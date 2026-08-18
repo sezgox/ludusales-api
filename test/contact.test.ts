@@ -1,17 +1,78 @@
-import { SELF } from 'cloudflare:test';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { env, SELF } from 'cloudflare:test';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import app from '../src/index';
 
-const authEnv = {
+const baseEnv = {
   JWT_SECRET: 'test-jwt-secret',
-  PLACEHOLDER_COMPANY_ID: '101',
-  PLACEHOLDER_COMPANY_PUBLIC_ID: '82b4c7b9-68d1-4cc6-9e36-41d4db4e05f0',
-  PLACEHOLDER_COMPANY_NAME: 'Ludus Sales Demo',
-  PLACEHOLDER_COMPANY_ACCESS_CODE: 'DEMO-ACCESS-2026',
   RESEND_API_KEY: 'test-key',
   CONTACT_TO_EMAIL: 'juan.mateo@ludusales.com',
   RESEND_FROM_EMAIL: 'Ludus Sales <contact@ludusales.com>',
   FRONTEND_ORIGINS: 'http://localhost:4200',
+};
+
+const db = (): Env['DB'] => (env as Env).DB;
+const authEnv = (): Env => ({
+  ...baseEnv,
+  DB: db(),
+});
+
+const seedAuthDb = async (): Promise<void> => {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS companies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      public_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE UNIQUE INDEX IF NOT EXISTS companies_public_id_unique ON companies (public_id)',
+    `CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      public_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('company', 'superuser')),
+      display_name TEXT NOT NULL,
+      email TEXT,
+      access_code_hash TEXT NOT NULL,
+      company_id INTEGER REFERENCES companies (id),
+      is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CHECK (
+        (role = 'company' AND company_id IS NOT NULL)
+        OR (role = 'superuser' AND company_id IS NULL)
+      )
+    )`,
+    'CREATE UNIQUE INDEX IF NOT EXISTS users_public_id_unique ON users (public_id)',
+    'CREATE UNIQUE INDEX IF NOT EXISTS users_access_code_hash_unique ON users (access_code_hash)',
+    'CREATE INDEX IF NOT EXISTS users_company_id_idx ON users (company_id)',
+    'DELETE FROM users',
+    'DELETE FROM companies',
+    `INSERT INTO companies (public_id, name)
+    VALUES
+      ('82b4c7b9-68d1-4cc6-9e36-41d4db4e05f0', 'Ludus Sales Demo'),
+      ('4c6f2c3d-3f73-4472-a453-4e0d6cb472d8', 'Ludus Sales Beta')`,
+    `INSERT INTO users (public_id, role, display_name, email, access_code_hash, company_id)
+    VALUES (
+      '99999999-9999-4999-8999-999999999999',
+      'superuser',
+      'Owner local',
+      'owner@ludusales.local',
+      'CaOHpuTkYPpTsPnn2_ySLAxTL5FDgbQUKJUtI0njtdU',
+      NULL
+    )`,
+    `INSERT INTO users (public_id, role, display_name, email, access_code_hash, company_id)
+    SELECT
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'company',
+      'Ludus Sales Demo',
+      'demo@ludusales.local',
+      'z2jjggVZ7dLgb7GtG2nIZklvToG8uRj9udau8ChlP10',
+      companies.id
+    FROM companies
+    WHERE companies.public_id = '82b4c7b9-68d1-4cc6-9e36-41d4db4e05f0'`,
+  ];
+
+  for (const statement of statements) {
+    await db().prepare(statement).run();
+  }
 };
 
 describe('contact endpoint', () => {
@@ -52,9 +113,7 @@ describe('contact endpoint', () => {
           teamSize: '1',
         }),
       },
-      {
-        ...authEnv,
-      },
+      baseEnv,
     );
 
     expect(response.status).toBe(200);
@@ -98,7 +157,11 @@ describe('contact endpoint', () => {
 });
 
 describe('auth endpoints', () => {
-  it('creates an HttpOnly session cookie for a valid access code', async () => {
+  beforeEach(async () => {
+    await seedAuthDb();
+  });
+
+  it('creates an HttpOnly session cookie for a valid company access code', async () => {
     const response = await app.request(
       '/auth/login',
       {
@@ -106,12 +169,13 @@ describe('auth endpoints', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ accessCode: 'DEMO-ACCESS-2026' }),
       },
-      authEnv,
+      authEnv(),
     );
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       ok: true,
+      role: 'company',
       company: {
         public_id: '82b4c7b9-68d1-4cc6-9e36-41d4db4e05f0',
         name: 'Ludus Sales Demo',
@@ -131,15 +195,60 @@ describe('auth endpoints', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ accessCode: 'WRONG-CODE' }),
       },
-      authEnv,
+      authEnv(),
     );
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({ error: 'Invalid access code.' });
   });
 
+  it('creates a superuser session from a DB user', async () => {
+    const response = await app.request(
+      '/auth/login',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accessCode: 'OWNER-LOCAL-2026' }),
+      },
+      authEnv(),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      role: 'superuser',
+      companies: [
+        {
+          public_id: '4c6f2c3d-3f73-4472-a453-4e0d6cb472d8',
+          name: 'Ludus Sales Beta',
+        },
+        {
+          public_id: '82b4c7b9-68d1-4cc6-9e36-41d4db4e05f0',
+          name: 'Ludus Sales Demo',
+        },
+      ],
+    });
+    expect(response.headers.get('Set-Cookie')).toContain('ls_session=');
+    expect(response.headers.get('Set-Cookie')).toContain('HttpOnly');
+  });
+
+  it('requires the DB binding for auth', async () => {
+    const response = await app.request(
+      '/auth/login',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accessCode: 'DEMO-ACCESS-2026' }),
+      },
+      baseEnv,
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({ error: 'Authentication service is not configured.' });
+  });
+
   it('rejects /auth/me without a session cookie', async () => {
-    const response = await app.request('/auth/me', undefined, authEnv);
+    const response = await app.request('/auth/me', undefined, authEnv());
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({ error: 'Not authenticated.' });
@@ -153,7 +262,7 @@ describe('auth endpoints', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ accessCode: 'DEMO-ACCESS-2026' }),
       },
-      authEnv,
+      authEnv(),
     );
     const sessionCookie = loginResponse.headers.get('Set-Cookie')?.split(';')[0];
 
@@ -166,16 +275,58 @@ describe('auth endpoints', () => {
       {
         headers: { Cookie: sessionCookie },
       },
-      authEnv,
+      authEnv(),
     );
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       ok: true,
+      role: 'company',
       company: {
         public_id: '82b4c7b9-68d1-4cc6-9e36-41d4db4e05f0',
         name: 'Ludus Sales Demo',
       },
+    });
+  });
+
+  it('returns the company catalog for a valid superuser session cookie', async () => {
+    const loginResponse = await app.request(
+      '/auth/login',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accessCode: 'OWNER-LOCAL-2026' }),
+      },
+      authEnv(),
+    );
+    const sessionCookie = loginResponse.headers.get('Set-Cookie')?.split(';')[0];
+
+    if (!sessionCookie) {
+      throw new Error('Expected session cookie');
+    }
+
+    const response = await app.request(
+      '/auth/me',
+      {
+        headers: { Cookie: sessionCookie },
+      },
+      authEnv(),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      role: 'superuser',
+      companies: [
+        {
+          public_id: '4c6f2c3d-3f73-4472-a453-4e0d6cb472d8',
+          name: 'Ludus Sales Beta',
+        },
+        {
+          public_id: '82b4c7b9-68d1-4cc6-9e36-41d4db4e05f0',
+          name: 'Ludus Sales Demo',
+        },
+      ],
     });
   });
 
@@ -185,7 +336,7 @@ describe('auth endpoints', () => {
       {
         method: 'POST',
       },
-      authEnv,
+      authEnv(),
     );
 
     expect(response.status).toBe(200);

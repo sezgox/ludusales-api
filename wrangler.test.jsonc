@@ -3,12 +3,17 @@
   "name": "ludusales-api-test",
   "main": "src/index.ts",
   "compatibility_date": "2025-12-10",
-  "vars": {
-    "CONTACT_TO_EMAIL": "juan.mateo@ludusales.com",
-    "RESEND_FROM_EMAIL": "Ludus Sales <juan.mateo@ludusales.com>",
-    "FRONTEND_ORIGINS": "https://ludusales.com,https://www.ludusales.com,http://localhost:4200",
-    "PLACEHOLDER_COMPANY_ID": "101",
-    "PLACEHOLDER_COMPANY_PUBLIC_ID": "82b4c7b9-68d1-4cc6-9e36-41d4db4e05f0",
-    "PLACEHOLDER_COMPANY_NAME": "Ludus Sales Demo"
-  }
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ludusales-db-test",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+	"vars": {
+		"CONTACT_TO_EMAIL": "juan.mateo@ludusales.com",
+		"RESEND_FROM_EMAIL": "Ludus Sales <juan.mateo@ludusales.com>",
+		"FRONTEND_ORIGINS": "https://ludusales.com,https://www.ludusales.com,http://localhost:4200"
+	}
 }

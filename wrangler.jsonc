@@ -1,14 +1,19 @@
 {
-  "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "ludusales-api",
-  "main": "src/index.ts",
-  "compatibility_date": "2025-12-10",
-  "vars": {
-    "CONTACT_TO_EMAIL": "juan.mateo@ludusales.com",
-    "RESEND_FROM_EMAIL": "Ludus Sales <juan.mateo@ludusales.com>",
-    "FRONTEND_ORIGINS": "https://ludusales.com,https://www.ludusales.com,http://localhost:4200",
-    "PLACEHOLDER_COMPANY_ID": "1",
-    "PLACEHOLDER_COMPANY_PUBLIC_ID": "00000000-0000-4000-8000-000000000001",
-    "PLACEHOLDER_COMPANY_NAME": "Empresa demo"
-  }
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "ludusales-api",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-12-10",
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "ludusales-db",
+			"database_id": "50b5f16d-4ea0-463c-ab30-74d4443df4ec",
+			"migrations_dir": "migrations"
+		}
+	],
+	"vars": {
+		"CONTACT_TO_EMAIL": "juan.mateo@ludusales.com",
+		"RESEND_FROM_EMAIL": "Ludus Sales <juan.mateo@ludusales.com>",
+		"FRONTEND_ORIGINS": "https://ludusales.com,https://www.ludusales.com,http://localhost:4200"
+	}
 }

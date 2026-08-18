@@ -1,6 +1,10 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
+import { and, asc, eq } from 'drizzle-orm';
+import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1';
+import * as schema from './db/schema';
+import { companies, users } from './db/schema';
 
 type ContactPayload = {
   firstName: string;
@@ -23,10 +27,11 @@ type Company = {
   id: number;
   public_id: string;
   name: string;
-  access_code: string;
 };
 
-type AuthenticatedCompany = Pick<Company, 'public_id' | 'name'>;
+type DashboardCompany = Pick<Company, 'public_id' | 'name'>;
+type AuthenticatedCompany = DashboardCompany;
+type UserRole = 'company' | 'superuser';
 
 type LoginPayload = {
   accessCode: string;
@@ -34,10 +39,25 @@ type LoginPayload = {
 
 type JwtPayload = {
   sub: string;
+  role: UserRole;
   iat: number;
   exp: number;
   jti: string;
 };
+
+type AuthenticatedPrincipal =
+  | {
+      role: 'company';
+      user_public_id: string;
+      company: AuthenticatedCompany;
+    }
+  | {
+      role: 'superuser';
+      user_public_id: string;
+      companies: DashboardCompany[];
+    };
+
+type D1DatabaseBinding = Parameters<typeof drizzle>[0];
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -78,20 +98,28 @@ app.post('/auth/login', async (c) => {
     return c.json({ error: payload.error }, 400);
   }
 
-  const company = readPlaceholderCompany(c.env);
-
-  if (!company || !c.env.JWT_SECRET) {
+  if (!c.env.JWT_SECRET) {
     return c.json({ error: 'Authentication service is not configured.' }, 500);
   }
 
-  if (!timingSafeStringEqual(payload.value.accessCode, company.access_code)) {
+  let principal: AuthenticatedPrincipal | null;
+
+  try {
+    principal = await authenticatePrincipal(c.env, payload.value.accessCode);
+  } catch (error) {
+    console.error('Authentication configuration error', error);
+    return c.json({ error: 'Authentication service is not configured.' }, 500);
+  }
+
+  if (!principal) {
     return c.json({ error: 'Invalid access code.' }, 401);
   }
 
   const now = Math.floor(Date.now() / 1000);
   const token = await signJwt(
     {
-      sub: company.public_id,
+      sub: principal.user_public_id,
+      role: principal.role,
       iat: now,
       exp: now + sessionMaxAgeSeconds,
       jti: crypto.randomUUID(),
@@ -101,14 +129,13 @@ app.post('/auth/login', async (c) => {
 
   setSessionCookie(c, token);
 
-  return c.json({ ok: true, company: toAuthenticatedCompany(company) });
+  return c.json({ ok: true, ...toAuthResponse(principal) });
 });
 
 app.get('/auth/me', async (c) => {
-  const company = readPlaceholderCompany(c.env);
   const token = getCookie(c, sessionCookieName);
 
-  if (!company || !c.env.JWT_SECRET) {
+  if (!c.env.JWT_SECRET) {
     return c.json({ error: 'Authentication service is not configured.' }, 500);
   }
 
@@ -118,11 +145,20 @@ app.get('/auth/me', async (c) => {
 
   const payload = await verifyJwt(token, c.env.JWT_SECRET);
 
-  if (!payload || payload.sub !== company.public_id) {
+  if (!payload) {
     return c.json({ error: 'Not authenticated.' }, 401);
   }
 
-  return c.json({ ok: true, company: toAuthenticatedCompany(company) });
+  let principal: AuthenticatedPrincipal | null;
+
+  try {
+    principal = await readPrincipal(c.env, payload);
+  } catch (error) {
+    console.error('Authentication configuration error', error);
+    return c.json({ error: 'Authentication service is not configured.' }, 500);
+  }
+
+  return principal ? c.json({ ok: true, ...toAuthResponse(principal) }) : c.json({ error: 'Not authenticated.' }, 401);
 });
 
 app.post('/auth/logout', (c) => {
@@ -217,21 +253,125 @@ const parseContactPayload = (body: unknown): ContactPayload | null => {
   return { firstName, lastName, email, company, teamSize };
 };
 
-const readPlaceholderCompany = (env: Env): Company | null => {
-  const id = Number.parseInt(env.PLACEHOLDER_COMPANY_ID, 10);
-  const publicId = env.PLACEHOLDER_COMPANY_PUBLIC_ID?.trim();
-  const name = env.PLACEHOLDER_COMPANY_NAME?.trim();
-  const accessCode = env.PLACEHOLDER_COMPANY_ACCESS_CODE?.trim();
+const createDb = (env: Env): DrizzleD1Database<typeof schema> | null => {
+  const d1Database: unknown = Reflect.get(env, 'DB');
 
-  if (!Number.isSafeInteger(id) || id <= 0 || !publicId || !name || !accessCode) {
+  return isD1Database(d1Database) ? drizzle(d1Database, { schema }) : null;
+};
+
+const isD1Database = (value: unknown): value is D1DatabaseBinding =>
+  isRecord(value) && typeof value['prepare'] === 'function';
+
+const authenticatePrincipal = async (env: Env, accessCode: string): Promise<AuthenticatedPrincipal | null> => {
+  const db = createDb(env);
+
+  if (!db) {
+    throw new Error('Missing D1 DB binding.');
+  }
+
+  return authenticatePrincipalFromDb(db, accessCode);
+};
+
+const authenticatePrincipalFromDb = async (
+  db: DrizzleD1Database<typeof schema>,
+  accessCode: string,
+): Promise<AuthenticatedPrincipal | null> => {
+  const accessCodeHash = await hashAccessCode(accessCode);
+  const user = await db
+    .select()
+    .from(users)
+    .where(and(eq(users.accessCodeHash, accessCodeHash), eq(users.isActive, true)))
+    .limit(1)
+    .get();
+
+  return user ? principalFromDbUser(db, user) : null;
+};
+
+const readPrincipal = async (env: Env, payload: JwtPayload): Promise<AuthenticatedPrincipal | null> => {
+  const db = createDb(env);
+
+  if (!db) {
+    throw new Error('Missing D1 DB binding.');
+  }
+
+  return readPrincipalFromDb(db, payload);
+};
+
+const readPrincipalFromDb = async (
+  db: DrizzleD1Database<typeof schema>,
+  payload: JwtPayload,
+): Promise<AuthenticatedPrincipal | null> => {
+  const user = await db
+    .select()
+    .from(users)
+    .where(and(eq(users.publicId, payload.sub), eq(users.role, payload.role), eq(users.isActive, true)))
+    .limit(1)
+    .get();
+
+  return user ? principalFromDbUser(db, user) : null;
+};
+
+const principalFromDbUser = async (
+  db: DrizzleD1Database<typeof schema>,
+  user: typeof users.$inferSelect,
+): Promise<AuthenticatedPrincipal | null> => {
+  if (user.role === 'superuser') {
+    return {
+      role: 'superuser',
+      user_public_id: user.publicId,
+      companies: await readDashboardCompaniesFromDb(db),
+    };
+  }
+
+  if (user.companyId === null) {
+    return null;
+  }
+
+  const company = await db.select().from(companies).where(eq(companies.id, user.companyId)).limit(1).get();
+
+  if (!company) {
     return null;
   }
 
   return {
-    id,
-    public_id: publicId,
-    name,
-    access_code: accessCode,
+    role: 'company',
+    user_public_id: user.publicId,
+    company: toAuthenticatedCompany({
+      id: company.id,
+      public_id: company.publicId,
+      name: company.name,
+    }),
+  };
+};
+
+const readDashboardCompaniesFromDb = async (
+  db: DrizzleD1Database<typeof schema>,
+): Promise<DashboardCompany[]> => {
+  const rows = await db
+    .select({
+      public_id: companies.publicId,
+      name: companies.name,
+    })
+    .from(companies)
+    .orderBy(asc(companies.name))
+    .all();
+
+  return rows;
+};
+
+const toAuthResponse = (
+  principal: AuthenticatedPrincipal,
+): { role: 'company'; company: AuthenticatedCompany } | { role: 'superuser'; companies: DashboardCompany[] } => {
+  if (principal.role === 'company') {
+    return {
+      role: 'company',
+      company: principal.company,
+    };
+  }
+
+  return {
+    role: 'superuser',
+    companies: principal.companies,
   };
 };
 
@@ -239,6 +379,14 @@ const toAuthenticatedCompany = (company: Company): AuthenticatedCompany => ({
   public_id: company.public_id,
   name: company.name,
 });
+
+const canAccessCompany = (principal: AuthenticatedPrincipal, companyPublicId: string): boolean => {
+  if (principal.role === 'company') {
+    return principal.company.public_id === companyPublicId;
+  }
+
+  return principal.companies.some((company) => company.public_id === companyPublicId);
+};
 
 const setSessionCookie = (c: Parameters<typeof setCookie>[0], token: string): void => {
   setCookie(c, sessionCookieName, token, {
@@ -310,12 +458,14 @@ const parseJwtPayload = (encodedPayload: string): JwtPayload | null => {
   }
 
   const sub = body['sub'];
+  const role = body['role'] ?? 'company';
   const iat = body['iat'];
   const exp = body['exp'];
   const jti = body['jti'];
 
   if (
     typeof sub !== 'string' ||
+    (role !== 'company' && role !== 'superuser') ||
     typeof iat !== 'number' ||
     typeof exp !== 'number' ||
     typeof jti !== 'string'
@@ -325,6 +475,7 @@ const parseJwtPayload = (encodedPayload: string): JwtPayload | null => {
 
   return {
     sub,
+    role,
     iat,
     exp,
     jti,
@@ -342,6 +493,12 @@ const hmacSha256 = async (value: string, secret: string): Promise<string> => {
   const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value));
 
   return encodeBase64Url(new Uint8Array(signature));
+};
+
+const hashAccessCode = async (value: string): Promise<string> => {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+
+  return encodeBase64Url(new Uint8Array(digest));
 };
 
 const encodeBase64Url = (value: string | Uint8Array): string => {
