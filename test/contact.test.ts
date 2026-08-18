@@ -330,6 +330,126 @@ describe('auth endpoints', () => {
     });
   });
 
+  it('rejects company creation without a session cookie', async () => {
+    const response = await app.request(
+      '/superuser/companies',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          companyName: 'Ludus Sales Nueva',
+          accountName: 'Cuenta nueva',
+          email: 'nueva@ludusales.local',
+          accessCode: 'NUEVA-ACCESS-2026',
+        }),
+      },
+      authEnv(),
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: 'Not authenticated.' });
+  });
+
+  it('forbids company creation for company users', async () => {
+    const loginResponse = await app.request(
+      '/auth/login',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accessCode: 'DEMO-ACCESS-2026' }),
+      },
+      authEnv(),
+    );
+    const sessionCookie = loginResponse.headers.get('Set-Cookie')?.split(';')[0];
+
+    if (!sessionCookie) {
+      throw new Error('Expected session cookie');
+    }
+
+    const response = await app.request(
+      '/superuser/companies',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: sessionCookie,
+        },
+        body: JSON.stringify({
+          companyName: 'Ludus Sales Nueva',
+          accountName: 'Cuenta nueva',
+          email: 'nueva@ludusales.local',
+          accessCode: 'NUEVA-ACCESS-2026',
+        }),
+      },
+      authEnv(),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: 'Forbidden.' });
+  });
+
+  it('creates a company and company account for superusers', async () => {
+    const loginResponse = await app.request(
+      '/auth/login',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accessCode: 'OWNER-LOCAL-2026' }),
+      },
+      authEnv(),
+    );
+    const sessionCookie = loginResponse.headers.get('Set-Cookie')?.split(';')[0];
+
+    if (!sessionCookie) {
+      throw new Error('Expected session cookie');
+    }
+
+    const response = await app.request(
+      '/superuser/companies',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: sessionCookie,
+        },
+        body: JSON.stringify({
+          companyName: 'Ludus Sales Nueva',
+          accountName: 'Cuenta nueva',
+          email: 'nueva@ludusales.local',
+          accessCode: 'NUEVA-ACCESS-2026',
+        }),
+      },
+      authEnv(),
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: true; company: { public_id: string; name: string } };
+
+    expect(body.ok).toBe(true);
+    expect(body.company.name).toBe('Ludus Sales Nueva');
+    expect(body.company.public_id).toEqual(expect.any(String));
+
+    const createdLoginResponse = await app.request(
+      '/auth/login',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accessCode: 'NUEVA-ACCESS-2026' }),
+      },
+      authEnv(),
+    );
+
+    expect(createdLoginResponse.status).toBe(200);
+    await expect(createdLoginResponse.json()).resolves.toEqual({
+      ok: true,
+      role: 'company',
+      company: {
+        public_id: body.company.public_id,
+        name: 'Ludus Sales Nueva',
+      },
+    });
+  });
+
   it('clears the session cookie on logout', async () => {
     const response = await app.request(
       '/auth/logout',

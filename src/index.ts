@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { and, asc, eq } from 'drizzle-orm';
@@ -37,6 +37,13 @@ type LoginPayload = {
   accessCode: string;
 };
 
+type CreateCompanyAccountPayload = {
+  companyName: string;
+  accountName: string;
+  email: string | null;
+  accessCode: string;
+};
+
 type JwtPayload = {
   sub: string;
   role: UserRole;
@@ -58,6 +65,7 @@ type AuthenticatedPrincipal =
     };
 
 type D1DatabaseBinding = Parameters<typeof drizzle>[0];
+type AppContext = Context<{ Bindings: Env }>;
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -167,6 +175,39 @@ app.post('/auth/logout', (c) => {
   return c.json({ ok: true });
 });
 
+app.post('/superuser/companies', async (c) => {
+  const payload = await readCreateCompanyAccountPayload(c.req.raw);
+
+  if (!payload.ok) {
+    return c.json({ error: payload.error }, 400);
+  }
+
+  const auth = await readAuthenticatedPrincipal(c);
+
+  if (!auth.ok) {
+    return auth.response;
+  }
+
+  if (auth.principal.role !== 'superuser') {
+    return c.json({ error: 'Forbidden.' }, 403);
+  }
+
+  const db = createDb(c.env);
+
+  if (!db) {
+    return c.json({ error: 'Authentication service is not configured.' }, 500);
+  }
+
+  try {
+    const company = await createCompanyAccountInDb(db, payload.value);
+
+    return c.json({ ok: true, company });
+  } catch (error) {
+    console.error('Company creation error', error);
+    return c.json({ error: 'Unable to create company.' }, isUniqueConstraintError(error) ? 409 : 500);
+  }
+});
+
 app.post('/contact', async (c) => {
   const payload = await readContactPayload(c.req.raw);
 
@@ -215,6 +256,26 @@ const readLoginPayload = async (
   return { ok: true, value: { accessCode } };
 };
 
+const readCreateCompanyAccountPayload = async (
+  request: Request,
+): Promise<{ ok: true; value: CreateCompanyAccountPayload } | { ok: false; error: string }> => {
+  let body: unknown;
+
+  try {
+    body = await request.json();
+  } catch {
+    return { ok: false, error: 'Invalid JSON body.' };
+  }
+
+  const parsed = parseCreateCompanyAccountPayload(body);
+
+  if (!parsed) {
+    return { ok: false, error: 'Invalid company payload.' };
+  }
+
+  return { ok: true, value: parsed };
+};
+
 const readContactPayload = async (
   request: Request,
 ): Promise<{ ok: true; value: ContactPayload } | { ok: false; error: string }> => {
@@ -233,6 +294,33 @@ const readContactPayload = async (
   }
 
   return { ok: true, value: parsed };
+};
+
+const parseCreateCompanyAccountPayload = (body: unknown): CreateCompanyAccountPayload | null => {
+  if (!isRecord(body)) {
+    return null;
+  }
+
+  const companyName = readRequiredString(body, 'companyName', 160);
+  const accountName = readRequiredString(body, 'accountName', 160);
+  const accessCode = readRequiredString(body, 'accessCode', 80);
+  const emailValue = body['email'];
+  const email = typeof emailValue === 'string' ? emailValue.trim() : null;
+
+  if (!companyName || !accountName || !accessCode || accessCode.length < 8) {
+    return null;
+  }
+
+  if (email && (email.length > 254 || !isEmail(email))) {
+    return null;
+  }
+
+  return {
+    companyName,
+    accountName,
+    email: email || null,
+    accessCode,
+  };
 };
 
 const parseContactPayload = (body: unknown): ContactPayload | null => {
@@ -297,6 +385,37 @@ const readPrincipal = async (env: Env, payload: JwtPayload): Promise<Authenticat
   return readPrincipalFromDb(db, payload);
 };
 
+const readAuthenticatedPrincipal = async (
+  c: AppContext,
+): Promise<{ ok: true; principal: AuthenticatedPrincipal } | { ok: false; response: Response }> => {
+  const token = getCookie(c, sessionCookieName);
+
+  if (!c.env.JWT_SECRET) {
+    return { ok: false, response: c.json({ error: 'Authentication service is not configured.' }, 500) };
+  }
+
+  if (!token) {
+    return { ok: false, response: c.json({ error: 'Not authenticated.' }, 401) };
+  }
+
+  const payload = await verifyJwt(token, c.env.JWT_SECRET);
+
+  if (!payload) {
+    return { ok: false, response: c.json({ error: 'Not authenticated.' }, 401) };
+  }
+
+  try {
+    const principal = await readPrincipal(c.env, payload);
+
+    return principal
+      ? { ok: true, principal }
+      : { ok: false, response: c.json({ error: 'Not authenticated.' }, 401) };
+  } catch (error) {
+    console.error('Authentication configuration error', error);
+    return { ok: false, response: c.json({ error: 'Authentication service is not configured.' }, 500) };
+  }
+};
+
 const readPrincipalFromDb = async (
   db: DrizzleD1Database<typeof schema>,
   payload: JwtPayload,
@@ -357,6 +476,49 @@ const readDashboardCompaniesFromDb = async (
     .all();
 
   return rows;
+};
+
+const createCompanyAccountInDb = async (
+  db: DrizzleD1Database<typeof schema>,
+  payload: CreateCompanyAccountPayload,
+): Promise<DashboardCompany> => {
+  const companyPublicId = crypto.randomUUID();
+  const userPublicId = crypto.randomUUID();
+  const accessCodeHash = await hashAccessCode(payload.accessCode);
+  const company = await db
+    .insert(companies)
+    .values({
+      publicId: companyPublicId,
+      name: payload.companyName,
+    })
+    .returning({
+      id: companies.id,
+      public_id: companies.publicId,
+      name: companies.name,
+    })
+    .get();
+
+  try {
+    await db
+      .insert(users)
+      .values({
+        publicId: userPublicId,
+        role: 'company',
+        displayName: payload.accountName,
+        email: payload.email,
+        accessCodeHash,
+        companyId: company.id,
+      })
+      .run();
+  } catch (error) {
+    await db.delete(companies).where(eq(companies.id, company.id)).run();
+    throw error;
+  }
+
+  return {
+    public_id: company.public_id,
+    name: company.name,
+  };
 };
 
 const toAuthResponse = (
@@ -727,6 +889,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 const isEmail = (value: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+
+const isUniqueConstraintError = (error: unknown): boolean =>
+  error instanceof Error && error.message.toLocaleLowerCase('en-US').includes('unique');
 
 const escapeHtml = (value: string): string =>
   value
