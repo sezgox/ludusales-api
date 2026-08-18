@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 
 type ContactPayload = {
   firstName: string;
@@ -18,10 +19,33 @@ type ResendEmailBody = {
   html: string;
 };
 
+type Company = {
+  id: number;
+  public_id: string;
+  name: string;
+  access_code: string;
+};
+
+type AuthenticatedCompany = Pick<Company, 'public_id' | 'name'>;
+
+type LoginPayload = {
+  accessCode: string;
+};
+
+type JwtPayload = {
+  sub: string;
+  iat: number;
+  exp: number;
+  jti: string;
+};
+
 const app = new Hono<{ Bindings: Env }>();
 
 const defaultAllowedOrigins = ['https://ludusales.com', 'https://www.ludusales.com', 'http://localhost:4200'];
 const defaultContactEmail = 'juan.mateo@ludusales.com';
+const sessionCookieName = 'ls_session';
+const sessionMaxAgeSeconds = 60 * 60 * 8;
+const jwtHeader = { alg: 'HS256', typ: 'JWT' };
 
 app.use(
   '*',
@@ -40,11 +64,72 @@ app.use(
     },
     allowMethods: ['GET', 'POST', 'OPTIONS'],
     allowHeaders: ['Content-Type'],
+    credentials: true,
     maxAge: 86400,
   }),
 );
 
 app.get('/health', (c) => c.json({ ok: true }));
+
+app.post('/auth/login', async (c) => {
+  const payload = await readLoginPayload(c.req.raw);
+
+  if (!payload.ok) {
+    return c.json({ error: payload.error }, 400);
+  }
+
+  const company = readPlaceholderCompany(c.env);
+
+  if (!company || !c.env.JWT_SECRET) {
+    return c.json({ error: 'Authentication service is not configured.' }, 500);
+  }
+
+  if (!timingSafeStringEqual(payload.value.accessCode, company.access_code)) {
+    return c.json({ error: 'Invalid access code.' }, 401);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const token = await signJwt(
+    {
+      sub: company.public_id,
+      iat: now,
+      exp: now + sessionMaxAgeSeconds,
+      jti: crypto.randomUUID(),
+    },
+    c.env.JWT_SECRET,
+  );
+
+  setSessionCookie(c, token);
+
+  return c.json({ ok: true, company: toAuthenticatedCompany(company) });
+});
+
+app.get('/auth/me', async (c) => {
+  const company = readPlaceholderCompany(c.env);
+  const token = getCookie(c, sessionCookieName);
+
+  if (!company || !c.env.JWT_SECRET) {
+    return c.json({ error: 'Authentication service is not configured.' }, 500);
+  }
+
+  if (!token) {
+    return c.json({ error: 'Not authenticated.' }, 401);
+  }
+
+  const payload = await verifyJwt(token, c.env.JWT_SECRET);
+
+  if (!payload || payload.sub !== company.public_id) {
+    return c.json({ error: 'Not authenticated.' }, 401);
+  }
+
+  return c.json({ ok: true, company: toAuthenticatedCompany(company) });
+});
+
+app.post('/auth/logout', (c) => {
+  deleteSessionCookie(c);
+
+  return c.json({ ok: true });
+});
 
 app.post('/contact', async (c) => {
   const payload = await readContactPayload(c.req.raw);
@@ -69,6 +154,30 @@ app.post('/contact', async (c) => {
 
   return c.json({ ok: true });
 });
+
+const readLoginPayload = async (
+  request: Request,
+): Promise<{ ok: true; value: LoginPayload } | { ok: false; error: string }> => {
+  let body: unknown;
+
+  try {
+    body = await request.json();
+  } catch {
+    return { ok: false, error: 'Invalid JSON body.' };
+  }
+
+  if (!isRecord(body)) {
+    return { ok: false, error: 'Invalid login payload.' };
+  }
+
+  const accessCode = readRequiredString(body, 'accessCode', 80);
+
+  if (!accessCode) {
+    return { ok: false, error: 'Invalid login payload.' };
+  }
+
+  return { ok: true, value: { accessCode } };
+};
 
 const readContactPayload = async (
   request: Request,
@@ -106,6 +215,161 @@ const parseContactPayload = (body: unknown): ContactPayload | null => {
   }
 
   return { firstName, lastName, email, company, teamSize };
+};
+
+const readPlaceholderCompany = (env: Env): Company | null => {
+  const id = Number.parseInt(env.PLACEHOLDER_COMPANY_ID, 10);
+  const publicId = env.PLACEHOLDER_COMPANY_PUBLIC_ID?.trim();
+  const name = env.PLACEHOLDER_COMPANY_NAME?.trim();
+  const accessCode = env.PLACEHOLDER_COMPANY_ACCESS_CODE?.trim();
+
+  if (!Number.isSafeInteger(id) || id <= 0 || !publicId || !name || !accessCode) {
+    return null;
+  }
+
+  return {
+    id,
+    public_id: publicId,
+    name,
+    access_code: accessCode,
+  };
+};
+
+const toAuthenticatedCompany = (company: Company): AuthenticatedCompany => ({
+  public_id: company.public_id,
+  name: company.name,
+});
+
+const setSessionCookie = (c: Parameters<typeof setCookie>[0], token: string): void => {
+  setCookie(c, sessionCookieName, token, {
+    httpOnly: true,
+    maxAge: sessionMaxAgeSeconds,
+    path: '/',
+    sameSite: 'Lax',
+    secure: shouldUseSecureCookie(c.req.raw),
+  });
+};
+
+const deleteSessionCookie = (c: Parameters<typeof deleteCookie>[0]): void => {
+  deleteCookie(c, sessionCookieName, {
+    path: '/',
+    sameSite: 'Lax',
+    secure: shouldUseSecureCookie(c.req.raw),
+  });
+};
+
+const shouldUseSecureCookie = (request: Request): boolean => {
+  const url = new URL(request.url);
+
+  return url.hostname !== 'localhost' && url.hostname !== '127.0.0.1';
+};
+
+const signJwt = async (payload: JwtPayload, secret: string): Promise<string> => {
+  const header = encodeBase64Url(JSON.stringify(jwtHeader));
+  const body = encodeBase64Url(JSON.stringify(payload));
+  const signature = await hmacSha256(`${header}.${body}`, secret);
+
+  return `${header}.${body}.${signature}`;
+};
+
+const verifyJwt = async (token: string, secret: string): Promise<JwtPayload | null> => {
+  const parts = token.split('.');
+
+  if (parts.length !== 3) {
+    return null;
+  }
+
+  const [header, body, signature] = parts;
+  const expectedSignature = await hmacSha256(`${header}.${body}`, secret);
+
+  if (!timingSafeStringEqual(signature, expectedSignature)) {
+    return null;
+  }
+
+  const parsed = parseJwtPayload(body);
+  const now = Math.floor(Date.now() / 1000);
+
+  if (!parsed || parsed.exp <= now) {
+    return null;
+  }
+
+  return parsed;
+};
+
+const parseJwtPayload = (encodedPayload: string): JwtPayload | null => {
+  let body: unknown;
+
+  try {
+    body = JSON.parse(decodeBase64Url(encodedPayload));
+  } catch {
+    return null;
+  }
+
+  if (!isRecord(body)) {
+    return null;
+  }
+
+  const sub = body['sub'];
+  const iat = body['iat'];
+  const exp = body['exp'];
+  const jti = body['jti'];
+
+  if (
+    typeof sub !== 'string' ||
+    typeof iat !== 'number' ||
+    typeof exp !== 'number' ||
+    typeof jti !== 'string'
+  ) {
+    return null;
+  }
+
+  return {
+    sub,
+    iat,
+    exp,
+    jti,
+  };
+};
+
+const hmacSha256 = async (value: string, secret: string): Promise<string> => {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value));
+
+  return encodeBase64Url(new Uint8Array(signature));
+};
+
+const encodeBase64Url = (value: string | Uint8Array): string => {
+  const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+  const binary = Array.from(bytes, (byte) => String.fromCodePoint(byte)).join('');
+
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+};
+
+const decodeBase64Url = (value: string): string => {
+  const padded = value.replaceAll('-', '+').replaceAll('_', '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
+  const binary = atob(padded);
+  const bytes = Uint8Array.from(binary, (character) => character.codePointAt(0) ?? 0);
+
+  return new TextDecoder().decode(bytes);
+};
+
+const timingSafeStringEqual = (left: string, right: string): boolean => {
+  const leftBytes = new TextEncoder().encode(left);
+  const rightBytes = new TextEncoder().encode(right);
+  const maxLength = Math.max(leftBytes.length, rightBytes.length);
+  let diff = leftBytes.length ^ rightBytes.length;
+
+  for (let index = 0; index < maxLength; index += 1) {
+    diff |= (leftBytes[index] ?? 0) ^ (rightBytes[index] ?? 0);
+  }
+
+  return diff === 0;
 };
 
 const sendContactEmail = (emailBody: ResendEmailBody, apiKey: string): Promise<Response> =>

@@ -6,6 +6,9 @@
   "vars": {
     "CONTACT_TO_EMAIL": "juan.mateo@ludusales.com",
     "RESEND_FROM_EMAIL": "Ludus Sales <juan.mateo@ludusales.com>",
-    "FRONTEND_ORIGINS": "https://ludusales.com,https://www.ludusales.com,http://localhost:4200"
+    "FRONTEND_ORIGINS": "https://ludusales.com,https://www.ludusales.com,http://localhost:4200",
+    "PLACEHOLDER_COMPANY_ID": "101",
+    "PLACEHOLDER_COMPANY_PUBLIC_ID": "82b4c7b9-68d1-4cc6-9e36-41d4db4e05f0",
+    "PLACEHOLDER_COMPANY_NAME": "Ludus Sales Demo"
   }
 }

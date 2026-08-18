@@ -4,9 +4,29 @@ Backend MVP de `ludusales.com`, hecho con Hono para Cloudflare Workers.
 
 El Worker se despliega como `ludusales-api`.
 
-## Endpoint
+## Endpoints
 
-`POST /contact`
+### `POST /auth/login`
+
+Inicia sesion de empresa con un codigo de acceso. Mientras no exista Supabase, valida contra variables placeholder del entorno.
+
+```json
+{
+  "accessCode": "DEMO-ACCESS-2026"
+}
+```
+
+Si el codigo es valido, responde con la empresa y crea la cookie `ls_session` como `HttpOnly`, `SameSite=Lax`, `Path=/` y `Max-Age=28800`. En produccion la cookie usa `Secure`.
+
+### `GET /auth/me`
+
+Lee la cookie `ls_session` y devuelve la empresa autenticada.
+
+### `POST /auth/logout`
+
+Borra la cookie `ls_session`.
+
+### `POST /contact`
 
 Envia dos correos con Resend:
 
@@ -31,7 +51,7 @@ Envia dos correos con Resend:
 npm install
 ```
 
-2. Crea `.dev.vars` usando `.env.example` como base y anade `RESEND_API_KEY`.
+2. Crea `.dev.vars` usando `.env.example` como base y anade `RESEND_API_KEY`, `JWT_SECRET` y `PLACEHOLDER_COMPANY_ACCESS_CODE`.
 
 3. Arranca el Worker:
 
@@ -47,6 +67,8 @@ Guarda la API key como secreto de Cloudflare:
 
 ```bash
 npx wrangler secret put RESEND_API_KEY
+npx wrangler secret put JWT_SECRET
+npx wrangler secret put PLACEHOLDER_COMPANY_ACCESS_CODE
 ```
 
 Despues despliega manualmente:
