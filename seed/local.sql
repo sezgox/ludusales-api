@@ -39,6 +39,97 @@ ON CONFLICT(public_id) DO UPDATE SET
   company_id = excluded.company_id,
   is_active = 1;
 
+-- Keep these two demo companies deterministic on every local seed run:
+-- Beta has one active gamification; Gamma has none.
+DELETE FROM gamifications
+WHERE company_id IN (
+  SELECT id
+  FROM companies
+  WHERE public_id IN (
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222'
+  )
+);
+
+INSERT INTO gamifications (
+  public_id,
+  company_id,
+  description,
+  image_key,
+  start_at,
+  end_at,
+  goal_value,
+  value_precision,
+  goal_unit,
+  status,
+  outcome
+)
+SELECT
+  '33333333-3333-4333-8333-333333333333',
+  companies.id,
+  '<h2>Reto comercial Beta</h2><p>Supera el objetivo de ventas y escala posiciones en el ranking.</p><blockquote>Cada venta suma. El trabajo en equipo marca la diferencia.</blockquote>',
+  NULL,
+  '2026-09-01T00:00:00.000Z',
+  '2099-12-31T23:59:59.000Z',
+  1500000,
+  2,
+  '€ en ventas',
+  'active',
+  'pending'
+FROM companies
+WHERE companies.public_id = '11111111-1111-4111-8111-111111111111';
+
+INSERT INTO prizes (public_id, gamification_id, name, picture_key, sort_order)
+SELECT
+  seed_prizes.public_id,
+  gamifications.id,
+  seed_prizes.name,
+  NULL,
+  seed_prizes.sort_order
+FROM gamifications
+JOIN (
+  SELECT
+    '44444444-4444-4444-8444-444444444444' AS public_id,
+    'Experiencia gastronómica' AS name,
+    0 AS sort_order
+  UNION ALL
+  SELECT
+    '55555555-5555-4555-8555-555555555555',
+    'Tarjeta regalo',
+    1
+) AS seed_prizes
+WHERE gamifications.public_id = '33333333-3333-4333-8333-333333333333';
+
+INSERT INTO rankings (gamification_id, external_participant_id, full_name, score_value)
+SELECT
+  gamifications.id,
+  seed_rankings.external_participant_id,
+  seed_rankings.full_name,
+  seed_rankings.score_value
+FROM gamifications
+JOIN (
+  SELECT
+    '66666666-6666-4666-8666-666666666666' AS external_participant_id,
+    'Ana García' AS full_name,
+    425000 AS score_value
+  UNION ALL
+  SELECT
+    '77777777-7777-4777-8777-777777777777',
+    'Bruno López',
+    425000
+  UNION ALL
+  SELECT
+    '88888888-8888-4888-8888-888888888888',
+    'Carla Martín',
+    350050
+  UNION ALL
+  SELECT
+    'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    'Diego Sánchez',
+    275000
+) AS seed_rankings
+WHERE gamifications.public_id = '33333333-3333-4333-8333-333333333333';
+
 INSERT INTO users (public_id, role, display_name, email, access_code_hash, company_id)
 SELECT
   'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
