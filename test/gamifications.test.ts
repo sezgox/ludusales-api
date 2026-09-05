@@ -128,8 +128,13 @@ describe('gamification API', () => {
     expect((await request(`/superuser/gamifications/${second.publicId}/activate`, cookie, { method: 'POST' })).status).toBe(200);
 
     const active = await testEnv.DB.prepare(
-      `SELECT COUNT(*) AS count FROM gamifications WHERE status = 'active'`,
-    ).first<{ count: number }>();
+      `SELECT COUNT(*) AS count
+       FROM gamifications
+       WHERE status = 'active'
+         AND company_id = (SELECT id FROM companies WHERE public_id = ?)`,
+    )
+      .bind(demoCompanyId)
+      .first<{ count: number }>();
     expect(active?.count).toBe(2);
   });
 
