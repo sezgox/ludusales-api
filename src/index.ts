@@ -5,6 +5,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1';
 import * as schema from './db/schema';
 import { companies, users } from './db/schema';
+import { registerGamificationRoutes, runGamificationMaintenance } from './gamifications';
 
 type ContactPayload = {
   firstName: string;
@@ -90,12 +91,17 @@ app.use(
 
       return allowedOrigins.includes(origin) ? origin : null;
     },
-    allowMethods: ['GET', 'POST', 'OPTIONS'],
+    allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Content-Type'],
     credentials: true,
     maxAge: 86400,
   }),
 );
+
+app.onError((error, c) => {
+  console.error(JSON.stringify({ message: 'Unhandled request error', error: error.message, path: c.req.path }));
+  return c.json({ error: 'Internal server error.' }, 500);
+});
 
 app.get('/health', (c) => c.json({ ok: true }));
 
@@ -901,4 +907,12 @@ const escapeHtml = (value: string): string =>
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
-export default app;
+registerGamificationRoutes(app, readAuthenticatedPrincipal, canAccessCompany);
+
+const worker = Object.assign(app, {
+  scheduled(_controller: unknown, env: Env, context: { waitUntil(promise: Promise<unknown>): void }): void {
+    context.waitUntil(runGamificationMaintenance(env));
+  },
+});
+
+export default worker;

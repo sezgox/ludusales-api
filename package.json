@@ -2,6 +2,10 @@
   "name": "ludusales-api",
   "version": "0.1.0",
   "private": true,
+  "overrides": {
+    "nanoid": "3.3.18",
+    "postcss": "8.5.28"
+  },
   "packageManager": "npm@10.9.2",
   "type": "module",
   "scripts": {
@@ -16,13 +20,15 @@
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
-    "hono": "^4.10.7"
+    "hono": "4.13.5",
+    "sanitize-html": "2.17.7"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.10.2",
+    "@types/sanitize-html": "2.16.1",
     "drizzle-kit": "0.31.10",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4",
-    "wrangler": "^4.100.0"
+    "wrangler": "4.129.0"
   }
 }

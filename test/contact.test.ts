@@ -14,6 +14,8 @@ const db = (): Env['DB'] => (env as Env).DB;
 const authEnv = (): Env => ({
   ...baseEnv,
   DB: db(),
+  MEDIA_BUCKET: (env as Env).MEDIA_BUCKET,
+  ASSET_BASE_URL: 'https://assets.ludusales.com',
 });
 
 const seedAuthDb = async (): Promise<void> => {
