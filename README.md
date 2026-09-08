@@ -29,8 +29,8 @@ Datos seed locales:
 
 - Superuser: `OWNER-LOCAL-2026`
 - Empresa demo: `DEMO-ACCESS-2026`
-- Ludus Sales Beta: `BETA-ACCESS-2026` (una gamificación activa con premios y ranking)
-- Ludus Sales Gamma: `GAMMA-ACCESS-2026` (sin gamificaciones)
+- Ludus Sales Beta: `BETA-ACCESS-2026` (una gamificación activa y otra finalizada)
+- Ludus Sales Gamma: `GAMMA-ACCESS-2026` (una gamificación activa)
 
 Cada ejecución de la seed restaura Beta y Gamma a esos estados para poder comprobar tanto el
 dashboard con datos como el estado vacío desde superuser y desde cada cuenta de empresa.

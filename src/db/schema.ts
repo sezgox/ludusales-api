@@ -40,6 +40,7 @@ export const gamifications = sqliteTable(
     companyId: integer('company_id')
       .notNull()
       .references(() => companies.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
     description: text('description').notNull(),
     imageKey: text('image_key'),
     startAt: text('start_at').notNull(),

@@ -109,6 +109,15 @@ describe('gamification API', () => {
 
     const created = await createGamification(superuserCookie, demoCompanyId, 'Visible');
     expect(created.goal).toBe('125.50');
+    expect(created.title).toBe('Reto de prueba');
+
+    const invalidPayload = gamificationPayload('Sin título');
+    const { title: _title, ...withoutTitle } = invalidPayload;
+    const missingTitle = await request(`/superuser/companies/${demoCompanyId}/gamifications`, superuserCookie, {
+      method: 'POST',
+      json: withoutTitle,
+    });
+    expect(missingTitle.status).toBe(400);
 
     const ownRead = await request(`/companies/${demoCompanyId}/gamifications`, companyCookie);
     expect(ownRead.status).toBe(200);
@@ -304,10 +313,11 @@ const createGamification = async (cookie: string, companyId: string, description
     json: gamificationPayload(description),
   });
   expect(response.status).toBe(201);
-  return ((await response.json()) as { gamification: { publicId: string; goal: string } }).gamification;
+  return ((await response.json()) as { gamification: { publicId: string; title: string; goal: string } }).gamification;
 };
 
 const gamificationPayload = (description: string) => ({
+  title: 'Reto de prueba',
   description,
   startAt: '2027-01-01T09:00:00+01:00',
   endAt: '2027-02-01T18:00:00+01:00',

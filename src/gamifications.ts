@@ -19,6 +19,7 @@ type GamificationRow = {
   public_id: string;
   company_id: number;
   company_public_id: string;
+  title: string;
   description: string;
   image_key: string | null;
   start_at: string;
@@ -54,6 +55,7 @@ type RankingRow = {
 };
 
 type GamificationInput = {
+  title: string;
   description: string;
   startAt: string;
   endAt: string;
@@ -68,6 +70,7 @@ const maxImageBytes = 2 * 1024 * 1024;
 const maxImageDimension = 2400;
 const maxRankingEntries = 1000;
 const maxScaledValue = 9_000_000_000_000;
+const maxTitleLength = 160;
 const maxDescriptionLength = 20_000;
 const allowedDescriptionTags = ['p', 'h2', 'h3', 'strong', 'em', 'u', 's', 'ul', 'ol', 'li', 'blockquote', 'br', 'a'];
 const immutableImageCacheControl = 'public, max-age=31536000, immutable';
@@ -173,12 +176,13 @@ export const registerGamificationRoutes = (
     const publicId = crypto.randomUUID();
     await c.env.DB.prepare(
       `INSERT INTO gamifications
-       (public_id, company_id, description, start_at, end_at, goal_value, value_precision, goal_unit)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (public_id, company_id, title, description, start_at, end_at, goal_value, value_precision, goal_unit)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         publicId,
         company.id,
+        parsed.value.title,
         parsed.value.description,
         parsed.value.startAt,
         parsed.value.endAt,
@@ -217,11 +221,12 @@ export const registerGamificationRoutes = (
 
     await c.env.DB.prepare(
       `UPDATE gamifications
-       SET description = ?, start_at = ?, end_at = ?, goal_value = ?, value_precision = ?, goal_unit = ?,
+       SET title = ?, description = ?, start_at = ?, end_at = ?, goal_value = ?, value_precision = ?, goal_unit = ?,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
     )
       .bind(
+        parsed.value.title,
         parsed.value.description,
         parsed.value.startAt,
         parsed.value.endAt,
@@ -532,7 +537,7 @@ export const runGamificationMaintenance = async (env: Env, now = new Date()): Pr
 };
 
 const gamificationSelect = `SELECT g.id, g.public_id, g.company_id, c.public_id AS company_public_id,
-  g.description, g.image_key, g.start_at, g.end_at, g.goal_value, g.value_precision, g.goal_unit,
+  g.title, g.description, g.image_key, g.start_at, g.end_at, g.goal_value, g.value_precision, g.goal_unit,
   g.status, g.outcome, g.created_at, g.updated_at, g.closed_at
   FROM gamifications g JOIN companies c ON c.id = g.company_id`;
 
@@ -595,6 +600,7 @@ const parseGamificationInput = (
 ): { ok: true; value: GamificationInput } | { ok: false; error: string } => {
   if (!isRecord(body)) return { ok: false, error: 'Invalid gamification payload.' };
 
+  const title = readString(body, 'title', maxTitleLength, existing?.title);
   const rawDescription = readString(body, 'description', maxDescriptionLength, existing?.description);
   const description = rawDescription === null ? null : sanitizeDescription(rawDescription);
   const goalUnit = readString(body, 'goalUnit', 40, existing?.goal_unit);
@@ -602,8 +608,8 @@ const parseGamificationInput = (
   const startAt = readIsoDate(body['startAt'], existing?.start_at);
   const endAt = readIsoDate(body['endAt'], existing?.end_at);
 
-  if (!description || goalUnit === null || typeof valuePrecision !== 'number' || !startAt || !endAt) {
-    return { ok: false, error: 'Description, dates, goal, value precision and goal unit are required.' };
+  if (!title || !description || goalUnit === null || typeof valuePrecision !== 'number' || !startAt || !endAt) {
+    return { ok: false, error: 'Title, description, dates, goal, value precision and goal unit are required.' };
   }
   if (endAt <= startAt) return { ok: false, error: 'End date must be after start date.' };
 
@@ -611,7 +617,7 @@ const parseGamificationInput = (
   const goalValue = parseDecimal(body['goal'] === undefined ? defaultGoal : body['goal'], valuePrecision);
   if (goalValue === null) return { ok: false, error: 'Goal must be a non-negative decimal matching value precision.' };
 
-  return { ok: true, value: { description, startAt, endAt, goalValue, valuePrecision, goalUnit } };
+  return { ok: true, value: { title, description, startAt, endAt, goalValue, valuePrecision, goalUnit } };
 };
 
 const sanitizeDescription = (value: string): string | null => {
@@ -719,6 +725,7 @@ const trimDecimalZeros = (value: string): string => value.replace(/(\.\d*?)0+$/,
 const serializeGamification = (row: GamificationRow, env: Env, requestUrl?: string) => ({
   publicId: row.public_id,
   companyPublicId: row.company_public_id,
+  title: row.title,
   description: row.description,
   imageUrl: row.image_key ? assetUrl(env, row.image_key, requestUrl) : null,
   startAt: row.start_at,
