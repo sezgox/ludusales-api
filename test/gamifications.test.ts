@@ -58,7 +58,7 @@ describe('gamification schema', () => {
       .run();
     const gamification = await testEnv.DB.prepare("SELECT id FROM gamifications WHERE public_id = 'cascade-test'").first<{ id: number }>();
     await testEnv.DB.prepare(
-      "INSERT INTO prizes (public_id, gamification_id, name) VALUES ('cascade-prize', ?, 'Prize')",
+      "INSERT INTO prizes (public_id, gamification_id, name, ranking_position) VALUES ('cascade-prize', ?, 'Prize', 1)",
     )
       .bind(gamification!.id)
       .run();
@@ -126,6 +126,51 @@ describe('gamification API', () => {
 
     const otherRead = await request(`/companies/${otherCompanyId}/gamifications`, companyCookie);
     expect(otherRead.status).toBe(403);
+  });
+
+  it('defaults and validates the Live Ranking participant limit', async () => {
+    const cookie = await login('OWNER-LOCAL-2026');
+    const gamification = await createGamification(cookie, demoCompanyId, 'Live limit');
+    const detail = await request(`/companies/${demoCompanyId}/gamifications/${gamification.publicId}`, cookie);
+    expect(((await detail.json()) as { gamification: { maxLiveRanking: number } }).gamification.maxLiveRanking).toBe(5);
+
+    const updated = await request(`/superuser/gamifications/${gamification.publicId}`, cookie, {
+      method: 'PATCH', json: { maxLiveRanking: 7 },
+    });
+    expect(updated.status).toBe(200);
+    expect(((await updated.json()) as { gamification: { maxLiveRanking: number } }).gamification.maxLiveRanking).toBe(7);
+
+    const invalid = await request(`/superuser/gamifications/${gamification.publicId}`, cookie, {
+      method: 'PATCH', json: { maxLiveRanking: 2 },
+    });
+    expect(invalid.status).toBe(400);
+  });
+
+  it('stores optional estimated prize value and enforces one prize per position', async () => {
+    const cookie = await login('OWNER-LOCAL-2026');
+    const gamification = await createGamification(cookie, demoCompanyId, 'Prizes');
+    const created = await request(`/superuser/gamifications/${gamification.publicId}/prizes`, cookie, {
+      method: 'POST', json: { name: 'Trip', rankingPosition: 1, estimatedValue: 99.95 },
+    });
+    expect(created.status).toBe(201);
+    const prize = ((await created.json()) as { prize: { publicId: string; rankingPosition: number; estimatedValue: number | null } }).prize;
+    expect(prize).toEqual({
+      publicId: expect.any(String), name: 'Trip', pictureUrl: null, sortOrder: 0, rankingPosition: 1, estimatedValue: 99.95,
+      createdAt: expect.any(String), updatedAt: expect.any(String),
+    });
+
+    const renamed = await request(`/superuser/prizes/${prize.publicId}`, cookie, { method: 'PATCH', json: { name: 'Trip renamed' } });
+    expect(((await renamed.json()) as { prize: { estimatedValue: number | null } }).prize.estimatedValue).toBe(99.95);
+
+    const duplicate = await request(`/superuser/gamifications/${gamification.publicId}/prizes`, cookie, {
+      method: 'POST', json: { name: 'Another trip', rankingPosition: 1, estimatedValue: null },
+    });
+    expect(duplicate.status).toBe(409);
+
+    const invalidAmount = await request(`/superuser/gamifications/${gamification.publicId}/prizes`, cookie, {
+      method: 'POST', json: { name: 'Invalid amount', rankingPosition: 2, estimatedValue: 10.999 },
+    });
+    expect(invalidAmount.status).toBe(400);
   });
 
   it('supports overlapping active gamifications', async () => {
@@ -262,7 +307,7 @@ describe('gamification API', () => {
     const gamification = await createGamification(cookie, demoCompanyId, 'Delete');
     const prizeResponse = await request(`/superuser/gamifications/${gamification.publicId}/prizes`, cookie, {
       method: 'POST',
-      json: { name: 'Trip' },
+      json: { name: 'Trip', rankingPosition: 1, estimatedValue: null },
     });
     const prize = (await prizeResponse.json()) as { prize: { publicId: string } };
     expect(prizeResponse.status).toBe(201);

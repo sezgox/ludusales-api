@@ -27,6 +27,7 @@ type GamificationRow = {
   goal_value: number;
   value_precision: number;
   goal_unit: string;
+  max_live_ranking: number;
   status: 'draft' | 'active' | 'closed';
   outcome: 'pending' | 'achieved' | 'missed';
   created_at: string;
@@ -41,6 +42,8 @@ type PrizeRow = {
   name: string;
   picture_key: string | null;
   sort_order: number;
+  ranking_position: number;
+  estimated_value_cents: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -62,6 +65,7 @@ type GamificationInput = {
   goalValue: number;
   valuePrecision: number;
   goalUnit: string;
+  maxLiveRanking: number;
 };
 
 type RankingInput = { externalParticipantId: string; fullName: string; scoreValue: number };
@@ -69,6 +73,7 @@ type RankingInput = { externalParticipantId: string; fullName: string; scoreValu
 const maxImageBytes = 2 * 1024 * 1024;
 const maxImageDimension = 2400;
 const maxRankingEntries = 1000;
+const minLiveRankingEntries = 3;
 const maxScaledValue = 9_000_000_000_000;
 const maxTitleLength = 160;
 const maxDescriptionLength = 20_000;
@@ -137,8 +142,9 @@ export const registerGamificationRoutes = (
 
     const [prizeResult, rankingResult] = await Promise.all([
       c.env.DB.prepare(
-        `SELECT id, public_id, gamification_id, name, picture_key, sort_order, created_at, updated_at
-         FROM prizes WHERE gamification_id = ? ORDER BY sort_order ASC, id ASC`,
+        `SELECT id, public_id, gamification_id, name, picture_key, sort_order, ranking_position, estimated_value_cents,
+                created_at, updated_at
+         FROM prizes WHERE gamification_id = ? ORDER BY ranking_position ASC, id ASC`,
       )
         .bind(gamification.id)
         .all<PrizeRow>(),
@@ -176,8 +182,8 @@ export const registerGamificationRoutes = (
     const publicId = crypto.randomUUID();
     await c.env.DB.prepare(
       `INSERT INTO gamifications
-       (public_id, company_id, title, description, start_at, end_at, goal_value, value_precision, goal_unit)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (public_id, company_id, title, description, start_at, end_at, goal_value, value_precision, goal_unit, max_live_ranking)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         publicId,
@@ -189,6 +195,7 @@ export const registerGamificationRoutes = (
         parsed.value.goalValue,
         parsed.value.valuePrecision,
         parsed.value.goalUnit,
+        parsed.value.maxLiveRanking,
       )
       .run();
 
@@ -221,7 +228,7 @@ export const registerGamificationRoutes = (
 
     await c.env.DB.prepare(
       `UPDATE gamifications
-       SET title = ?, description = ?, start_at = ?, end_at = ?, goal_value = ?, value_precision = ?, goal_unit = ?,
+       SET title = ?, description = ?, start_at = ?, end_at = ?, goal_value = ?, value_precision = ?, goal_unit = ?, max_live_ranking = ?,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
     )
@@ -233,6 +240,7 @@ export const registerGamificationRoutes = (
         parsed.value.goalValue,
         parsed.value.valuePrecision,
         parsed.value.goalUnit,
+        parsed.value.maxLiveRanking,
         gamification.id,
       )
       .run();
@@ -311,10 +319,19 @@ export const registerGamificationRoutes = (
         .first<{ next_order: number }>())?.next_order ?? 0);
     const publicId = crypto.randomUUID();
 
-    await c.env.DB.prepare(
-      'INSERT INTO prizes (public_id, gamification_id, name, sort_order) VALUES (?, ?, ?, ?)',
+    const rankingPosition = parsed.value.rankingPosition;
+    const existingPosition = await c.env.DB.prepare(
+      'SELECT id FROM prizes WHERE gamification_id = ? AND ranking_position = ? LIMIT 1',
     )
-      .bind(publicId, gamification.id, parsed.value.name, sortOrder)
+      .bind(gamification.id, rankingPosition)
+      .first<{ id: number }>();
+    if (existingPosition) return c.json({ error: 'A prize already exists for this ranking position.' }, 409);
+
+    await c.env.DB.prepare(
+      `INSERT INTO prizes (public_id, gamification_id, name, sort_order, ranking_position, estimated_value_cents)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(publicId, gamification.id, parsed.value.name, sortOrder, rankingPosition, parsed.value.estimatedValueCents)
       .run();
     const prize = await findPrize(c.env.DB, publicId);
     return c.json({ ok: true, prize: serializePrize(prize!, c.env, c.req.url) }, 201);
@@ -331,8 +348,18 @@ export const registerGamificationRoutes = (
     const body = await readJson(c.req.raw);
     const parsed = parsePrizeInput(body, prize);
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
-    await c.env.DB.prepare('UPDATE prizes SET name = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-      .bind(parsed.value.name, parsed.value.sortOrder, prize.id)
+    const duplicatePosition = await c.env.DB.prepare(
+      'SELECT id FROM prizes WHERE gamification_id = ? AND ranking_position = ? AND id != ? LIMIT 1',
+    )
+      .bind(prize.gamification_id, parsed.value.rankingPosition, prize.id)
+      .first<{ id: number }>();
+    if (duplicatePosition) return c.json({ error: 'A prize already exists for this ranking position.' }, 409);
+    await c.env.DB.prepare(
+      `UPDATE prizes
+       SET name = ?, sort_order = ?, ranking_position = ?, estimated_value_cents = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+    )
+      .bind(parsed.value.name, parsed.value.sortOrder, parsed.value.rankingPosition, parsed.value.estimatedValueCents, prize.id)
       .run();
     const updated = await findPrize(c.env.DB, prize.public_id);
     return c.json({ ok: true, prize: serializePrize(updated!, c.env, c.req.url) });
@@ -537,7 +564,7 @@ export const runGamificationMaintenance = async (env: Env, now = new Date()): Pr
 };
 
 const gamificationSelect = `SELECT g.id, g.public_id, g.company_id, c.public_id AS company_public_id,
-  g.title, g.description, g.image_key, g.start_at, g.end_at, g.goal_value, g.value_precision, g.goal_unit,
+  g.title, g.description, g.image_key, g.start_at, g.end_at, g.goal_value, g.value_precision, g.goal_unit, g.max_live_ranking,
   g.status, g.outcome, g.created_at, g.updated_at, g.closed_at
   FROM gamifications g JOIN companies c ON c.id = g.company_id`;
 
@@ -552,7 +579,8 @@ const requireWritableGamification = findGamification;
 const findPrize = (db: D1Database, publicId: string): Promise<PrizeRow | null> =>
   db
     .prepare(
-      `SELECT id, public_id, gamification_id, name, picture_key, sort_order, created_at, updated_at
+      `SELECT id, public_id, gamification_id, name, picture_key, sort_order, ranking_position, estimated_value_cents,
+              created_at, updated_at
        FROM prizes WHERE public_id = ? LIMIT 1`,
     )
     .bind(publicId)
@@ -567,7 +595,8 @@ type PrizeWithGamification = PrizeRow & {
 const findPrizeWithGamification = (db: D1Database, publicId: string): Promise<PrizeWithGamification | null> =>
   db
     .prepare(
-      `SELECT p.id, p.public_id, p.gamification_id, p.name, p.picture_key, p.sort_order, p.created_at, p.updated_at,
+      `SELECT p.id, p.public_id, p.gamification_id, p.name, p.picture_key, p.sort_order, p.ranking_position,
+              p.estimated_value_cents, p.created_at, p.updated_at,
               g.status, g.public_id AS gamification_public_id, c.public_id AS company_public_id
        FROM prizes p
        JOIN gamifications g ON g.id = p.gamification_id
@@ -605,10 +634,19 @@ const parseGamificationInput = (
   const description = rawDescription === null ? null : sanitizeDescription(rawDescription);
   const goalUnit = readString(body, 'goalUnit', 40, existing?.goal_unit);
   const valuePrecision = readInteger(body, 'valuePrecision', 0, 6, existing?.value_precision);
+  const maxLiveRanking = readInteger(
+    body,
+    'maxLiveRanking',
+    minLiveRankingEntries,
+    maxRankingEntries,
+    existing?.max_live_ranking ?? 5,
+  );
   const startAt = readIsoDate(body['startAt'], existing?.start_at);
   const endAt = readIsoDate(body['endAt'], existing?.end_at);
 
-  if (!title || !description || goalUnit === null || typeof valuePrecision !== 'number' || !startAt || !endAt) {
+  if (
+    !title || !description || goalUnit === null || typeof valuePrecision !== 'number' || typeof maxLiveRanking !== 'number' || !startAt || !endAt
+  ) {
     return { ok: false, error: 'Title, description, dates, goal, value precision and goal unit are required.' };
   }
   if (endAt <= startAt) return { ok: false, error: 'End date must be after start date.' };
@@ -617,7 +655,7 @@ const parseGamificationInput = (
   const goalValue = parseDecimal(body['goal'] === undefined ? defaultGoal : body['goal'], valuePrecision);
   if (goalValue === null) return { ok: false, error: 'Goal must be a non-negative decimal matching value precision.' };
 
-  return { ok: true, value: { title, description, startAt, endAt, goalValue, valuePrecision, goalUnit } };
+  return { ok: true, value: { title, description, startAt, endAt, goalValue, valuePrecision, goalUnit, maxLiveRanking } };
 };
 
 const sanitizeDescription = (value: string): string | null => {
@@ -643,12 +681,21 @@ const sanitizeDescription = (value: string): string | null => {
 const parsePrizeInput = (
   body: unknown,
   existing?: PrizeRow,
-): { ok: true; value: { name: string; sortOrder: number | undefined } } | { ok: false; error: string } => {
+): {
+  ok: true;
+  value: { name: string; sortOrder: number | undefined; rankingPosition: number; estimatedValueCents: number | null };
+} | { ok: false; error: string } => {
   if (!isRecord(body)) return { ok: false, error: 'Invalid prize payload.' };
   const name = readString(body, 'name', 160, existing?.name);
   const sortOrder = readInteger(body, 'sortOrder', 0, Number.MAX_SAFE_INTEGER, existing?.sort_order, true);
-  if (name === null || sortOrder === null) return { ok: false, error: 'Prize name or sort order is invalid.' };
-  return { ok: true, value: { name, sortOrder } };
+  const rankingPosition = readInteger(body, 'rankingPosition', 1, maxRankingEntries, existing?.ranking_position);
+  const estimatedValueCents = body['estimatedValue'] === undefined
+    ? (existing?.estimated_value_cents ?? null)
+    : parseEuroAmount(body['estimatedValue']);
+  if (name === null || sortOrder === null || typeof rankingPosition !== 'number' || estimatedValueCents === undefined) {
+    return { ok: false, error: 'Prize name, ranking position or estimated value is invalid.' };
+  }
+  return { ok: true, value: { name, sortOrder, rankingPosition, estimatedValueCents } };
 };
 
 const parseRankingInput = (
@@ -714,6 +761,13 @@ const parseDecimal = (raw: unknown, precision: number): number | null => {
   return Number.isSafeInteger(value) && value >= 0 && value <= maxScaledValue ? value : null;
 };
 
+const parseEuroAmount = (raw: unknown): number | null | undefined => {
+  if (raw === null) return null;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return undefined;
+  const cents = Math.round(raw * 100);
+  return Number.isSafeInteger(cents) && Math.abs(raw * 100 - cents) < 0.000_001 ? cents : undefined;
+};
+
 const formatDecimal = (value: number, precision: number): string => {
   if (precision === 0) return String(value);
   const raw = String(value).padStart(precision + 1, '0');
@@ -733,6 +787,7 @@ const serializeGamification = (row: GamificationRow, env: Env, requestUrl?: stri
   goal: formatDecimal(row.goal_value, row.value_precision),
   valuePrecision: row.value_precision,
   goalUnit: row.goal_unit,
+  maxLiveRanking: row.max_live_ranking,
   status: row.status,
   outcome: row.outcome,
   createdAt: row.created_at,
@@ -745,6 +800,8 @@ const serializePrize = (row: PrizeRow, env: Env, requestUrl?: string) => ({
   name: row.name,
   pictureUrl: row.picture_key ? assetUrl(env, row.picture_key, requestUrl) : null,
   sortOrder: row.sort_order,
+  rankingPosition: row.ranking_position,
+  estimatedValue: row.estimated_value_cents === null ? null : row.estimated_value_cents / 100,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });

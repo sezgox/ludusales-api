@@ -48,6 +48,7 @@ export const gamifications = sqliteTable(
     goalValue: integer('goal_value').notNull(),
     valuePrecision: integer('value_precision').notNull(),
     goalUnit: text('goal_unit').notNull(),
+    maxLiveRanking: integer('max_live_ranking').notNull().default(5),
     status: text('status', { enum: ['draft', 'active', 'closed'] }).notNull().default('draft'),
     outcome: text('outcome', { enum: ['pending', 'achieved', 'missed'] }).notNull().default('pending'),
     createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -60,6 +61,7 @@ export const gamifications = sqliteTable(
     check('gamifications_dates_check', sql`${table.endAt} > ${table.startAt}`),
     check('gamifications_goal_check', sql`${table.goalValue} >= 0`),
     check('gamifications_precision_check', sql`${table.valuePrecision} BETWEEN 0 AND 6`),
+    check('gamifications_max_live_ranking_check', sql`${table.maxLiveRanking} BETWEEN 3 AND 1000`),
     check(
       'gamifications_state_check',
       sql`(${table.status} = 'closed' AND ${table.outcome} IN ('achieved', 'missed') AND ${table.closedAt} IS NOT NULL)
@@ -79,13 +81,18 @@ export const prizes = sqliteTable(
     name: text('name').notNull(),
     pictureKey: text('picture_key'),
     sortOrder: integer('sort_order').notNull().default(0),
+    rankingPosition: integer('ranking_position').notNull(),
+    estimatedValueCents: integer('estimated_value_cents'),
     createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
     uniqueIndex('prizes_public_id_unique').on(table.publicId),
-    index('prizes_gamification_order_idx').on(table.gamificationId, table.sortOrder, table.id),
+    index('prizes_gamification_order_idx').on(table.gamificationId, table.rankingPosition, table.id),
+    uniqueIndex('prizes_gamification_ranking_position_unique').on(table.gamificationId, table.rankingPosition),
     check('prizes_sort_order_check', sql`${table.sortOrder} >= 0`),
+    check('prizes_ranking_position_check', sql`${table.rankingPosition} >= 1`),
+    check('prizes_estimated_value_check', sql`${table.estimatedValueCents} >= 0`),
   ],
 );
 

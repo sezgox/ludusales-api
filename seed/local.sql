@@ -79,24 +79,30 @@ SELECT
 FROM companies
 WHERE companies.public_id = '11111111-1111-4111-8111-111111111111';
 
-INSERT INTO prizes (public_id, gamification_id, name, picture_key, sort_order)
+INSERT INTO prizes (public_id, gamification_id, name, picture_key, sort_order, ranking_position, estimated_value_cents)
 SELECT
   seed_prizes.public_id,
   gamifications.id,
   seed_prizes.name,
   NULL,
-  seed_prizes.sort_order
+  seed_prizes.sort_order,
+  seed_prizes.ranking_position,
+  seed_prizes.estimated_value_cents
 FROM gamifications
 JOIN (
   SELECT
     '44444444-4444-4444-8444-444444444444' AS public_id,
     'Experiencia gastronómica' AS name,
-    0 AS sort_order
+    0 AS sort_order,
+    1 AS ranking_position,
+    15000 AS estimated_value_cents
   UNION ALL
   SELECT
     '55555555-5555-4555-8555-555555555555',
     'Tarjeta regalo',
-    1
+    1,
+    2,
+    NULL
 ) AS seed_prizes
 WHERE gamifications.public_id = '33333333-3333-4333-8333-333333333333';
 
