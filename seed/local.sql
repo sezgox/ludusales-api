@@ -133,6 +133,26 @@ JOIN (
     'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
     'Diego Sánchez',
     275000
+  UNION ALL
+  SELECT
+    'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    'Elena Ruiz',
+    235000
+  UNION ALL
+  SELECT
+    'ffffffff-ffff-4fff-8fff-ffffffffffff',
+    'Fernando Vega',
+    195000
+  UNION ALL
+  SELECT
+    '12121212-1212-4212-8212-121212121212',
+    'Gabriela Torres',
+    160000
+  UNION ALL
+  SELECT
+    '34343434-3434-4434-8434-343434343434',
+    'Hugo Martín',
+    120000
 ) AS seed_rankings
 WHERE gamifications.public_id = '33333333-3333-4333-8333-333333333333';
 

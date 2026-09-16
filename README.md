@@ -91,7 +91,7 @@ Todas las operaciones bajo `/superuser` exigen rol `superuser`:
 - `POST /superuser/companies/:companyPublicId/gamifications`
 - `PATCH|DELETE /superuser/gamifications/:gamificationPublicId`
 - `POST /superuser/gamifications/:gamificationPublicId/activate`
-- `POST /superuser/gamifications/:gamificationPublicId/close`
+- `POST /superuser/gamifications/:gamificationPublicId/deactivate`
 - `POST /superuser/gamifications/:gamificationPublicId/prizes`
 - `PATCH|DELETE /superuser/prizes/:prizePublicId`
 - `PUT|DELETE /superuser/gamifications/:gamificationPublicId/image`
@@ -112,9 +112,11 @@ Ejemplo de creación:
 }
 ```
 
-La posición del ranking se calcula con ranking de competición (`1, 1, 3`). Al cerrar una
+La posición del ranking se calcula con ranking de competición (`1, 1, 3`). Al desactivar una
 gamificación, `outcome` pasa a `achieved` si la suma de puntuaciones alcanza el objetivo; en otro
-caso pasa a `missed`. El cron `*/5 * * * *` cierra automáticamente las activas vencidas y limpia R2.
+caso pasa a `missed`. Las inactivas siguen siendo editables y pueden reactivarse. Si su fecha de fin
+ya venció, la activación requiere una nueva fecha futura. El cron `*/5 * * * *` desactiva las activas
+vencidas y limpia R2.
 
 Las rutas de imagen reciben el WebP como cuerpo binario con `Content-Type: image/webp`. Límite:
 2 MB y 2400 px por dimensión. La conversión debe realizarse en el navegador antes de subir.

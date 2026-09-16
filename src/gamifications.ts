@@ -33,6 +33,7 @@ type GamificationRow = {
   created_at: string;
   updated_at: string;
   closed_at: string | null;
+  actual_end_at: string | null;
 };
 
 type PrizeRow = {
@@ -51,6 +52,7 @@ type PrizeRow = {
 type RankingRow = {
   external_participant_id: string;
   full_name: string;
+  picture_key: string | null;
   score_value: number;
   position: number;
   created_at: string;
@@ -115,6 +117,8 @@ export const registerGamificationRoutes = (
     if (!company) return c.json({ error: 'Company not found.' }, 404);
     if (!canAccessCompany(auth.principal, company.public_id)) return c.json({ error: 'Forbidden.' }, 403);
 
+    await deactivateExpiredGamifications(c.env.DB, new Date().toISOString());
+
     const result = await c.env.DB.prepare(
       `${gamificationSelect} WHERE g.company_id = ? ORDER BY g.start_at DESC, g.id DESC`,
     )
@@ -135,6 +139,7 @@ export const registerGamificationRoutes = (
     if (!company) return c.json({ error: 'Company not found.' }, 404);
     if (!canAccessCompany(auth.principal, company.public_id)) return c.json({ error: 'Forbidden.' }, 403);
 
+    await deactivateExpiredGamifications(c.env.DB, new Date().toISOString());
     const gamification = await findGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification || gamification.company_id !== company.id) {
       return c.json({ error: 'Gamification not found.' }, 404);
@@ -149,7 +154,7 @@ export const registerGamificationRoutes = (
         .bind(gamification.id)
         .all<PrizeRow>(),
       c.env.DB.prepare(
-        `SELECT external_participant_id, full_name, score_value, created_at, updated_at,
+        `SELECT external_participant_id, full_name, picture_key, score_value, created_at, updated_at,
                 RANK() OVER (ORDER BY score_value DESC) AS position
          FROM rankings WHERE gamification_id = ?
          ORDER BY score_value DESC, full_name ASC, external_participant_id ASC`,
@@ -163,7 +168,7 @@ export const registerGamificationRoutes = (
       gamification: {
         ...serializeGamification(gamification, c.env, c.req.url),
         prizes: prizeResult.results.map((row: PrizeRow) => serializePrize(row, c.env, c.req.url)),
-        ranking: rankingResult.results.map((row: RankingRow) => serializeRanking(row, gamification.value_precision)),
+        ranking: rankingResult.results.map((row: RankingRow) => serializeRanking(row, gamification.value_precision, c.env, c.req.url)),
       },
     });
   });
@@ -209,8 +214,6 @@ export const registerGamificationRoutes = (
 
     const gamification = await findGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
-    if (gamification.status === 'closed') return c.json({ error: 'Closed gamifications are immutable.' }, 409);
-
     const body = await readJson(c.req.raw);
     if (!isRecord(body)) return c.json({ error: 'Invalid gamification payload.' }, 400);
 
@@ -253,31 +256,43 @@ export const registerGamificationRoutes = (
     const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
     if (!auth.ok) return auth.response;
 
-    const gamification = await findGamification(c.env.DB, c.req.param('gamificationPublicId'));
+    let gamification = await findGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
-    if (gamification.status === 'closed') return c.json({ error: 'Closed gamifications are immutable.' }, 409);
-    if (gamification.end_at <= new Date().toISOString()) {
-      return c.json({ error: 'A gamification cannot be activated after its end date.' }, 409);
+    const now = new Date().toISOString();
+    if (gamification.status === 'active' && gamification.end_at <= now) {
+      await deactivateGamification(c.env.DB, gamification.id, now);
+      gamification = await findGamification(c.env.DB, gamification.public_id);
+    }
+    if (gamification!.status === 'active') return c.json({ error: 'Gamification is already active.' }, 409);
+
+    const body = await readJson(c.req.raw);
+    const requestedEndAt = isRecord(body) && body['endAt'] !== undefined
+      ? readIsoDate(body['endAt'])
+      : gamification!.end_at;
+    if (!requestedEndAt || requestedEndAt <= gamification!.start_at || requestedEndAt <= now) {
+      return c.json({ error: 'A new end date after the current time is required to activate this gamification.' }, 409);
     }
 
     await c.env.DB.prepare(
-      `UPDATE gamifications SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      `UPDATE gamifications
+       SET status = 'active', outcome = 'pending', closed_at = NULL, actual_end_at = NULL, end_at = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
     )
-      .bind(gamification.id)
+      .bind(requestedEndAt, gamification!.id)
       .run();
-    const updated = await findGamification(c.env.DB, gamification.public_id);
+    const updated = await findGamification(c.env.DB, gamification!.public_id);
     return c.json({ ok: true, gamification: serializeGamification(updated!, c.env, c.req.url) });
   });
 
-  app.post('/superuser/gamifications/:gamificationPublicId/close', async (c) => {
+  app.post('/superuser/gamifications/:gamificationPublicId/deactivate', async (c) => {
     const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
     if (!auth.ok) return auth.response;
 
     const gamification = await findGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
-    if (gamification.status !== 'active') return c.json({ error: 'Only active gamifications can be closed.' }, 409);
+    if (gamification.status !== 'active') return c.json({ error: 'Only active gamifications can be deactivated.' }, 409);
 
-    await closeGamification(c.env.DB, gamification.id, new Date().toISOString());
+    await deactivateGamification(c.env.DB, gamification.id, new Date().toISOString());
     const updated = await findGamification(c.env.DB, gamification.public_id);
     return c.json({ ok: true, gamification: serializeGamification(updated!, c.env, c.req.url) });
   });
@@ -290,9 +305,11 @@ export const registerGamificationRoutes = (
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
 
     const pictures = await c.env.DB.prepare(
-      'SELECT picture_key FROM prizes WHERE gamification_id = ? AND picture_key IS NOT NULL',
+      `SELECT picture_key FROM prizes WHERE gamification_id = ? AND picture_key IS NOT NULL
+       UNION ALL
+       SELECT picture_key FROM rankings WHERE gamification_id = ? AND picture_key IS NOT NULL`,
     )
-      .bind(gamification.id)
+      .bind(gamification.id, gamification.id)
       .all<{ picture_key: string }>();
     const keys = [gamification.image_key, ...pictures.results.map((row: { picture_key: string }) => row.picture_key)].filter(
       (key): key is string => Boolean(key),
@@ -307,8 +324,6 @@ export const registerGamificationRoutes = (
     if (!auth.ok) return auth.response;
     const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
-    if (gamification.status === 'closed') return c.json({ error: 'Closed gamifications are immutable.' }, 409);
-
     const body = await readJson(c.req.raw);
     const parsed = parsePrizeInput(body);
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
@@ -342,9 +357,6 @@ export const registerGamificationRoutes = (
     if (!auth.ok) return auth.response;
     const prize = await findPrize(c.env.DB, c.req.param('prizePublicId'));
     if (!prize) return c.json({ error: 'Prize not found.' }, 404);
-    if (await isGamificationClosed(c.env.DB, prize.gamification_id)) {
-      return c.json({ error: 'Closed gamifications are immutable.' }, 409);
-    }
     const body = await readJson(c.req.raw);
     const parsed = parsePrizeInput(body, prize);
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
@@ -370,9 +382,6 @@ export const registerGamificationRoutes = (
     if (!auth.ok) return auth.response;
     const prize = await findPrize(c.env.DB, c.req.param('prizePublicId'));
     if (!prize) return c.json({ error: 'Prize not found.' }, 404);
-    if (await isGamificationClosed(c.env.DB, prize.gamification_id)) {
-      return c.json({ error: 'Closed gamifications are immutable.' }, 409);
-    }
     const statements = [c.env.DB.prepare('DELETE FROM prizes WHERE id = ?').bind(prize.id)];
     if (prize.picture_key) statements.unshift(enqueueMediaStatement(c.env.DB, prize.picture_key));
     await c.env.DB.batch(statements);
@@ -384,8 +393,6 @@ export const registerGamificationRoutes = (
     if (!auth.ok) return auth.response;
     const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
-    if (gamification.status === 'closed') return c.json({ error: 'Closed gamifications are immutable.' }, 409);
-
     const body = await readJson(c.req.raw);
     if (!isRecord(body) || !Array.isArray(body['entries']) || body['entries'].length > maxRankingEntries) {
       return c.json({ error: 'Ranking entries must be an array with at most 1000 items.' }, 400);
@@ -402,15 +409,32 @@ export const registerGamificationRoutes = (
       entries.push(parsed.value);
     }
 
-    await c.env.DB.batch([
+    const existingPictures = await c.env.DB.prepare(
+      'SELECT external_participant_id, picture_key FROM rankings WHERE gamification_id = ? AND picture_key IS NOT NULL',
+    ).bind(gamification.id).all<{ external_participant_id: string; picture_key: string }>();
+    const replacementIds = new Set(entries.map((entry) => entry.externalParticipantId));
+    const retainedPictures = new Map(
+      existingPictures.results.map((row: { external_participant_id: string; picture_key: string }) => [row.external_participant_id, row.picture_key]),
+    );
+    const statements = [
+      ...existingPictures.results
+        .filter((row: { external_participant_id: string; picture_key: string }) => !replacementIds.has(row.external_participant_id))
+        .map((row: { external_participant_id: string; picture_key: string }) => enqueueMediaStatement(c.env.DB, row.picture_key)),
       c.env.DB.prepare('DELETE FROM rankings WHERE gamification_id = ?').bind(gamification.id),
       ...entries.map((entry) =>
         c.env.DB.prepare(
-          `INSERT INTO rankings (gamification_id, external_participant_id, full_name, score_value)
-           VALUES (?, ?, ?, ?)`,
-        ).bind(gamification.id, entry.externalParticipantId, entry.fullName, entry.scoreValue),
+          `INSERT INTO rankings (gamification_id, external_participant_id, full_name, picture_key, score_value)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).bind(
+          gamification.id,
+          entry.externalParticipantId,
+          entry.fullName,
+          retainedPictures.get(entry.externalParticipantId) ?? null,
+          entry.scoreValue,
+        ),
       ),
-    ]);
+    ];
+    await c.env.DB.batch(statements);
     return c.json({ ok: true, count: entries.length });
   });
 
@@ -419,8 +443,6 @@ export const registerGamificationRoutes = (
     if (!auth.ok) return auth.response;
     const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
-    if (gamification.status === 'closed') return c.json({ error: 'Closed gamifications are immutable.' }, 409);
-
     const body = await readJson(c.req.raw);
     const parsed = parseRankingInput(
       { ...(isRecord(body) ? body : {}), externalParticipantId: c.req.param('externalParticipantId') },
@@ -451,10 +473,52 @@ export const registerGamificationRoutes = (
     if (!auth.ok) return auth.response;
     const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
-    if (gamification.status === 'closed') return c.json({ error: 'Closed gamifications are immutable.' }, 409);
-    await c.env.DB.prepare('DELETE FROM rankings WHERE gamification_id = ? AND external_participant_id = ?')
-      .bind(gamification.id, c.req.param('externalParticipantId'))
-      .run();
+    const participant = await findRanking(c.env.DB, gamification.id, c.req.param('externalParticipantId'));
+    if (!participant) return c.json({ ok: true });
+    const statements = [
+      c.env.DB.prepare('DELETE FROM rankings WHERE gamification_id = ? AND external_participant_id = ?')
+        .bind(gamification.id, participant.external_participant_id),
+    ];
+    if (participant.picture_key) statements.unshift(enqueueMediaStatement(c.env.DB, participant.picture_key));
+    await c.env.DB.batch(statements);
+    return c.json({ ok: true });
+  });
+
+  app.put('/superuser/gamifications/:gamificationPublicId/ranking/:externalParticipantId/picture', async (c) => {
+    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
+    if (!auth.ok) return auth.response;
+    const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
+    if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
+    const participant = await findRanking(c.env.DB, gamification.id, c.req.param('externalParticipantId'));
+    if (!participant) return c.json({ error: 'Ranking participant not found.' }, 404);
+    const image = await readWebp(c.req.raw);
+    if (!image.ok) return c.json({ error: image.error }, image.status);
+    const participantId = encodeURIComponent(participant.external_participant_id);
+    const key = `companies/${gamification.company_public_id}/gamifications/${gamification.public_id}/participants/${participantId}/${crypto.randomUUID()}.webp`;
+    const stored = await replaceMedia(c.env, key, image.bytes, participant.picture_key, () =>
+      c.env.DB.prepare(
+        'UPDATE rankings SET picture_key = ?, updated_at = CURRENT_TIMESTAMP WHERE gamification_id = ? AND external_participant_id = ?',
+      ).bind(key, gamification.id, participant.external_participant_id),
+    );
+    if (!stored.ok) return c.json({ error: stored.error }, 500);
+    return c.json({ ok: true, pictureUrl: assetUrl(c.env, key) });
+  });
+
+  app.delete('/superuser/gamifications/:gamificationPublicId/ranking/:externalParticipantId/picture', async (c) => {
+    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
+    if (!auth.ok) return auth.response;
+    const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
+    if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
+    const participant = await findRanking(c.env.DB, gamification.id, c.req.param('externalParticipantId'));
+    if (!participant) return c.json({ error: 'Ranking participant not found.' }, 404);
+    if (participant.picture_key) {
+      await c.env.DB.batch([
+        c.env.DB.prepare(
+          'UPDATE rankings SET picture_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE gamification_id = ? AND external_participant_id = ?',
+        ).bind(gamification.id, participant.external_participant_id),
+        enqueueMediaStatement(c.env.DB, participant.picture_key),
+      ]);
+    }
     return c.json({ ok: true });
   });
 
@@ -463,8 +527,6 @@ export const registerGamificationRoutes = (
     if (!auth.ok) return auth.response;
     const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
-    if (gamification.status === 'closed') return c.json({ error: 'Closed gamifications are immutable.' }, 409);
-
     const image = await readWebp(c.req.raw);
     if (!image.ok) return c.json({ error: image.error }, image.status);
     const key = `companies/${gamification.company_public_id}/gamifications/${gamification.public_id}/cover/${crypto.randomUUID()}.webp`;
@@ -483,7 +545,6 @@ export const registerGamificationRoutes = (
     if (!auth.ok) return auth.response;
     const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
-    if (gamification.status === 'closed') return c.json({ error: 'Closed gamifications are immutable.' }, 409);
     if (gamification.image_key) {
       await c.env.DB.batch([
         c.env.DB.prepare('UPDATE gamifications SET image_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(
@@ -500,8 +561,6 @@ export const registerGamificationRoutes = (
     if (!auth.ok) return auth.response;
     const prize = await findPrizeWithGamification(c.env.DB, c.req.param('prizePublicId'));
     if (!prize) return c.json({ error: 'Prize not found.' }, 404);
-    if (prize.status === 'closed') return c.json({ error: 'Closed gamifications are immutable.' }, 409);
-
     const image = await readWebp(c.req.raw);
     if (!image.ok) return c.json({ error: image.error }, image.status);
     const key = `companies/${prize.company_public_id}/gamifications/${prize.gamification_public_id}/prizes/${prize.public_id}/${crypto.randomUUID()}.webp`;
@@ -517,7 +576,6 @@ export const registerGamificationRoutes = (
     if (!auth.ok) return auth.response;
     const prize = await findPrizeWithGamification(c.env.DB, c.req.param('prizePublicId'));
     if (!prize) return c.json({ error: 'Prize not found.' }, 404);
-    if (prize.status === 'closed') return c.json({ error: 'Closed gamifications are immutable.' }, 409);
     if (prize.picture_key) {
       await c.env.DB.batch([
         c.env.DB.prepare('UPDATE prizes SET picture_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(prize.id),
@@ -530,19 +588,7 @@ export const registerGamificationRoutes = (
 
 export const runGamificationMaintenance = async (env: Env, now = new Date()): Promise<void> => {
   const closedAt = now.toISOString();
-  await env.DB.prepare(
-    `UPDATE gamifications
-     SET status = 'closed',
-         outcome = CASE
-           WHEN (SELECT COALESCE(SUM(r.score_value), 0) FROM rankings r WHERE r.gamification_id = gamifications.id) >= goal_value
-             THEN 'achieved'
-           ELSE 'missed'
-         END,
-         closed_at = ?, updated_at = CURRENT_TIMESTAMP
-     WHERE status = 'active' AND end_at <= ?`,
-  )
-    .bind(closedAt, closedAt)
-    .run();
+  await deactivateExpiredGamifications(env.DB, closedAt);
 
   const queued = await env.DB.prepare(
     'SELECT object_key FROM media_deletion_queue ORDER BY created_at ASC LIMIT 100',
@@ -565,7 +611,7 @@ export const runGamificationMaintenance = async (env: Env, now = new Date()): Pr
 
 const gamificationSelect = `SELECT g.id, g.public_id, g.company_id, c.public_id AS company_public_id,
   g.title, g.description, g.image_key, g.start_at, g.end_at, g.goal_value, g.value_precision, g.goal_unit, g.max_live_ranking,
-  g.status, g.outcome, g.created_at, g.updated_at, g.closed_at
+  g.status, g.outcome, g.created_at, g.updated_at, g.closed_at, g.actual_end_at
   FROM gamifications g JOIN companies c ON c.id = g.company_id`;
 
 const findCompany = (db: D1Database, publicId: string): Promise<CompanyRow | null> =>
@@ -610,9 +656,14 @@ const rankingCount = async (db: D1Database, gamificationId: number): Promise<num
   (await db.prepare('SELECT COUNT(*) AS count FROM rankings WHERE gamification_id = ?').bind(gamificationId).first<{ count: number }>())
     ?.count ?? 0;
 
-const isGamificationClosed = async (db: D1Database, gamificationId: number): Promise<boolean> =>
-  (await db.prepare('SELECT status FROM gamifications WHERE id = ?').bind(gamificationId).first<{ status: string }>())
-    ?.status === 'closed';
+const findRanking = (db: D1Database, gamificationId: number, externalParticipantId: string): Promise<RankingRow | null> =>
+  db
+    .prepare(
+      `SELECT external_participant_id, full_name, picture_key, score_value, created_at, updated_at, 0 AS position
+       FROM rankings WHERE gamification_id = ? AND external_participant_id = ? LIMIT 1`,
+    )
+    .bind(gamificationId, externalParticipantId)
+    .first<RankingRow>();
 
 const requireSuperuser = async (
   c: AppContext,
@@ -788,11 +839,11 @@ const serializeGamification = (row: GamificationRow, env: Env, requestUrl?: stri
   valuePrecision: row.value_precision,
   goalUnit: row.goal_unit,
   maxLiveRanking: row.max_live_ranking,
-  status: row.status,
+  status: row.status === 'closed' ? 'inactive' : row.status,
   outcome: row.outcome,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
-  closedAt: row.closed_at,
+  actualEndAt: row.actual_end_at ?? row.closed_at,
 });
 
 const serializePrize = (row: PrizeRow, env: Env, requestUrl?: string) => ({
@@ -806,9 +857,10 @@ const serializePrize = (row: PrizeRow, env: Env, requestUrl?: string) => ({
   updatedAt: row.updated_at,
 });
 
-const serializeRanking = (row: RankingRow, precision: number) => ({
+const serializeRanking = (row: RankingRow, precision: number, env: Env, requestUrl?: string) => ({
   externalParticipantId: row.external_participant_id,
   fullName: row.full_name,
+  pictureUrl: row.picture_key ? assetUrl(env, row.picture_key, requestUrl) : null,
   position: row.position,
   score: formatDecimal(row.score_value, precision),
   createdAt: row.created_at,
@@ -825,7 +877,7 @@ const assetUrl = (env: Env, key: string, requestUrl?: string): string => {
   return `${base}/${path}`;
 };
 
-const closeGamification = (db: D1Database, id: number, closedAt: string): Promise<D1Result> =>
+const deactivateExpiredGamifications = (db: D1Database, actualEndAt: string): Promise<D1Result> =>
   db
     .prepare(
       `UPDATE gamifications
@@ -835,10 +887,26 @@ const closeGamification = (db: D1Database, id: number, closedAt: string): Promis
                THEN 'achieved'
              ELSE 'missed'
            END,
-           closed_at = ?, updated_at = CURRENT_TIMESTAMP
+           closed_at = ?, actual_end_at = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE status = 'active' AND end_at <= ?`,
+    )
+    .bind(actualEndAt, actualEndAt, actualEndAt)
+    .run();
+
+const deactivateGamification = (db: D1Database, id: number, actualEndAt: string): Promise<D1Result> =>
+  db
+    .prepare(
+      `UPDATE gamifications
+       SET status = 'closed',
+           outcome = CASE
+             WHEN (SELECT COALESCE(SUM(r.score_value), 0) FROM rankings r WHERE r.gamification_id = gamifications.id) >= goal_value
+               THEN 'achieved'
+             ELSE 'missed'
+           END,
+           closed_at = ?, actual_end_at = ?, updated_at = CURRENT_TIMESTAMP
        WHERE id = ? AND status = 'active'`,
     )
-    .bind(closedAt, id)
+    .bind(actualEndAt, actualEndAt, id)
     .run();
 
 const enqueueMediaStatement = (db: D1Database, key: string): D1PreparedStatement =>

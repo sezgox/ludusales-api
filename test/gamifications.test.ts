@@ -192,7 +192,7 @@ describe('gamification API', () => {
     expect(active?.count).toBe(2);
   });
 
-  it('replaces and upserts rankings, derives 1-1-3 positions and freezes a closed result', async () => {
+  it('replaces and upserts rankings, derives 1-1-3 positions and keeps inactive gamifications editable', async () => {
     const cookie = await login('OWNER-LOCAL-2026');
     const gamification = await createGamification(cookie, demoCompanyId, 'Ranking');
     await request(`/superuser/gamifications/${gamification.publicId}/activate`, cookie, { method: 'POST' });
@@ -222,15 +222,48 @@ describe('gamification API', () => {
     expect(detailBody.gamification.ranking.map((entry) => entry.position)).toEqual([1, 1, 3]);
     expect(detailBody.gamification.ranking[2]).toMatchObject({ fullName: 'Carla Ruiz', score: '25.00' });
 
-    const closed = await request(`/superuser/gamifications/${gamification.publicId}/close`, cookie, { method: 'POST' });
-    const closedBody = (await closed.json()) as { gamification: { status: string; outcome: string } };
-    expect(closedBody.gamification).toMatchObject({ status: 'closed', outcome: 'achieved' });
+    const picture = await request(`/superuser/gamifications/${gamification.publicId}/ranking/p3/picture`, cookie, {
+      method: 'PUT', body: webp(80, 80), contentType: 'image/webp',
+    });
+    expect(picture.status).toBe(200);
+    const withPicture = await request(`/companies/${demoCompanyId}/gamifications/${gamification.publicId}`, cookie);
+    const picturedEntry = ((await withPicture.json()) as {
+      gamification: { ranking: Array<{ externalParticipantId: string; pictureUrl: string | null }> };
+    }).gamification.ranking.find((entry) => entry.externalParticipantId === 'p3');
+    expect(picturedEntry?.pictureUrl).toContain('/participants/p3/');
 
-    const frozen = await request(`/superuser/gamifications/${gamification.publicId}/ranking/p1`, cookie, {
+    expect((await request(`/superuser/gamifications/${gamification.publicId}/ranking/p3/picture`, cookie, { method: 'DELETE' })).status).toBe(200);
+
+    const deactivated = await request(`/superuser/gamifications/${gamification.publicId}/deactivate`, cookie, { method: 'POST' });
+    const deactivatedBody = (await deactivated.json()) as { gamification: { status: string; outcome: string; actualEndAt: string } };
+    expect(deactivatedBody.gamification).toMatchObject({ status: 'inactive', outcome: 'achieved', actualEndAt: expect.any(String) });
+    expect((await request(`/superuser/gamifications/${gamification.publicId}/deactivate`, cookie, { method: 'POST' })).status).toBe(409);
+
+    const editable = await request(`/superuser/gamifications/${gamification.publicId}/ranking/p1`, cookie, {
       method: 'PUT',
       json: { fullName: 'Ana', score: '60.00' },
     });
-    expect(frozen.status).toBe(409);
+    expect(editable.status).toBe(200);
+  });
+
+  it('requires a new future end date to reactivate an expired gamification', async () => {
+    const cookie = await login('OWNER-LOCAL-2026');
+    const company = await testEnv.DB.prepare('SELECT id FROM companies WHERE public_id = ?').bind(demoCompanyId).first<{ id: number }>();
+    await testEnv.DB.prepare(
+      `INSERT INTO gamifications
+       (public_id, company_id, description, start_at, end_at, goal_value, value_precision, goal_unit, status)
+       VALUES ('reactivation-expired', ?, 'Expired', '2025-01-01T00:00:00.000Z', '2025-01-02T00:00:00.000Z', 1000, 2, 'sales', 'active')`,
+    ).bind(company!.id).run();
+
+    const missingEndDate = await request('/superuser/gamifications/reactivation-expired/activate', cookie, { method: 'POST' });
+    expect(missingEndDate.status).toBe(409);
+
+    const reactivated = await request('/superuser/gamifications/reactivation-expired/activate', cookie, {
+      method: 'POST',
+      json: { endAt: '2027-02-01T00:00:00.000Z' },
+    });
+    expect(((await reactivated.json()) as { gamification: { status: string; endAt: string; actualEndAt: string | null } }).gamification)
+      .toMatchObject({ status: 'active', endAt: '2027-02-01T00:00:00.000Z', actualEndAt: null });
   });
 
   it('closes expired active gamifications from scheduled maintenance', async () => {
@@ -244,11 +277,12 @@ describe('gamification API', () => {
       .run();
 
     await runGamificationMaintenance(testEnv, new Date('2025-01-03T00:00:00.000Z'));
-    const row = await testEnv.DB.prepare("SELECT status, outcome FROM gamifications WHERE public_id = 'expired'").first<{
+    const row = await testEnv.DB.prepare("SELECT status, outcome, actual_end_at FROM gamifications WHERE public_id = 'expired'").first<{
       status: string;
       outcome: string;
+      actual_end_at: string | null;
     }>();
-    expect(row).toEqual({ status: 'closed', outcome: 'missed' });
+    expect(row).toMatchObject({ status: 'closed', outcome: 'missed', actual_end_at: '2025-01-03T00:00:00.000Z' });
   });
 
   it('validates WebP, stores immutable media and removes replaced objects through the queue', async () => {

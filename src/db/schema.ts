@@ -54,6 +54,7 @@ export const gamifications = sqliteTable(
     createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
     closedAt: text('closed_at'),
+    actualEndAt: text('actual_end_at'),
   },
   (table) => [
     uniqueIndex('gamifications_public_id_unique').on(table.publicId),
@@ -105,6 +106,7 @@ export const rankings = sqliteTable(
       .references(() => gamifications.id, { onDelete: 'cascade' }),
     externalParticipantId: text('external_participant_id').notNull(),
     fullName: text('full_name').notNull(),
+    pictureKey: text('picture_key'),
     scoreValue: integer('score_value').notNull(),
     createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
