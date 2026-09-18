@@ -146,6 +146,42 @@ describe('gamification API', () => {
     expect(invalid.status).toBe(400);
   });
 
+  it('stores ordered rules and closes gamifications without a goal as not applicable', async () => {
+    const cookie = await login('OWNER-LOCAL-2026');
+    const payload = {
+      ...gamificationPayload('Rules'),
+      goal: null,
+      goalUnit: null,
+      rules: [
+        { position: 2, title: 'Premio', description: 'Gana puntos por resultados.', iconName: 'award' },
+        { position: 1, title: 'Ventas', description: 'Cierra ventas y suma puntos.', iconName: 'chart-column' },
+      ],
+    };
+    const created = await request(`/superuser/companies/${demoCompanyId}/gamifications`, cookie, { method: 'POST', json: payload });
+    expect(created.status).toBe(201);
+    const gamification = (await created.json()) as { gamification: { publicId: string; goal: null; goalUnit: null } };
+    expect(gamification.gamification).toMatchObject({ goal: null, goalUnit: null });
+
+    const detail = await request(`/companies/${demoCompanyId}/gamifications/${gamification.gamification.publicId}`, cookie);
+    expect(((await detail.json()) as { gamification: { rules: Array<{ position: number; iconName: string }> } }).gamification.rules)
+      .toEqual([{ position: 1, title: 'Ventas', description: 'Cierra ventas y suma puntos.', iconName: 'chart-column' }, { position: 2, title: 'Premio', description: 'Gana puntos por resultados.', iconName: 'award' }]);
+
+    const invalid = await request(`/superuser/gamifications/${gamification.gamification.publicId}`, cookie, {
+      method: 'PATCH',
+      json: { rules: [{ position: 1, title: 'Duplicada', description: 'Una.', iconName: 'star' }, { position: 1, title: 'Duplicada', description: 'Dos.', iconName: 'star' }] },
+    });
+    expect(invalid.status).toBe(400);
+
+    expect((await request(`/superuser/gamifications/${gamification.gamification.publicId}/activate`, cookie, { method: 'POST' })).status).toBe(200);
+    const deactivated = await request(`/superuser/gamifications/${gamification.gamification.publicId}/deactivate`, cookie, { method: 'POST' });
+    expect(((await deactivated.json()) as { gamification: { outcome: string } }).gamification.outcome).toBe('not_applicable');
+
+    const goalAddedAfterClose = await request(`/superuser/gamifications/${gamification.gamification.publicId}`, cookie, {
+      method: 'PATCH', json: { goal: '1', goalUnit: 'ventas' },
+    });
+    expect(((await goalAddedAfterClose.json()) as { gamification: { outcome: string } }).gamification.outcome).toBe('missed');
+  });
+
   it('stores optional estimated prize value and enforces one prize per position', async () => {
     const cookie = await login('OWNER-LOCAL-2026');
     const gamification = await createGamification(cookie, demoCompanyId, 'Prizes');

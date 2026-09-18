@@ -40,17 +40,17 @@ export const gamifications = sqliteTable(
     companyId: integer('company_id')
       .notNull()
       .references(() => companies.id, { onDelete: 'cascade' }),
-    title: text('title').notNull(),
+    title: text('title').notNull().default('Gamificación'),
     description: text('description').notNull(),
     imageKey: text('image_key'),
     startAt: text('start_at').notNull(),
     endAt: text('end_at').notNull(),
-    goalValue: integer('goal_value').notNull(),
+    goalValue: integer('goal_value'),
     valuePrecision: integer('value_precision').notNull(),
-    goalUnit: text('goal_unit').notNull(),
+    goalUnit: text('goal_unit'),
     maxLiveRanking: integer('max_live_ranking').notNull().default(5),
     status: text('status', { enum: ['draft', 'active', 'closed'] }).notNull().default('draft'),
-    outcome: text('outcome', { enum: ['pending', 'achieved', 'missed'] }).notNull().default('pending'),
+    outcome: text('outcome', { enum: ['pending', 'achieved', 'missed', 'not_applicable'] }).notNull().default('pending'),
     createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
     closedAt: text('closed_at'),
@@ -60,14 +60,38 @@ export const gamifications = sqliteTable(
     uniqueIndex('gamifications_public_id_unique').on(table.publicId),
     index('gamifications_company_status_start_idx').on(table.companyId, table.status, table.startAt),
     check('gamifications_dates_check', sql`${table.endAt} > ${table.startAt}`),
-    check('gamifications_goal_check', sql`${table.goalValue} >= 0`),
+    check('gamifications_goal_check', sql`${table.goalValue} IS NULL OR ${table.goalValue} >= 0`),
     check('gamifications_precision_check', sql`${table.valuePrecision} BETWEEN 0 AND 6`),
     check('gamifications_max_live_ranking_check', sql`${table.maxLiveRanking} BETWEEN 3 AND 1000`),
     check(
       'gamifications_state_check',
-      sql`(${table.status} = 'closed' AND ${table.outcome} IN ('achieved', 'missed') AND ${table.closedAt} IS NOT NULL)
+      sql`(${table.status} = 'closed' AND (
+            (${table.goalValue} IS NULL AND ${table.outcome} = 'not_applicable')
+            OR (${table.goalValue} IS NOT NULL AND ${table.outcome} IN ('achieved', 'missed'))
+          ) AND ${table.closedAt} IS NOT NULL)
           OR (${table.status} IN ('draft', 'active') AND ${table.outcome} = 'pending' AND ${table.closedAt} IS NULL)`,
     ),
+  ],
+);
+
+export const gamificationRules = sqliteTable(
+  'gamification_rules',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    gamificationId: integer('gamification_id')
+      .notNull()
+      .references(() => gamifications.id, { onDelete: 'cascade' }),
+    position: integer('position').notNull(),
+    title: text('title').notNull(),
+    description: text('description').notNull(),
+    iconName: text('icon_name').notNull(),
+    createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex('gamification_rules_position_unique').on(table.gamificationId, table.position),
+    index('gamification_rules_gamification_position_idx').on(table.gamificationId, table.position),
+    check('gamification_rules_position_check', sql`${table.position} >= 1`),
   ],
 );
 

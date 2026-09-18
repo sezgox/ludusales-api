@@ -24,12 +24,12 @@ type GamificationRow = {
   image_key: string | null;
   start_at: string;
   end_at: string;
-  goal_value: number;
+  goal_value: number | null;
   value_precision: number;
-  goal_unit: string;
+  goal_unit: string | null;
   max_live_ranking: number;
   status: 'draft' | 'active' | 'closed';
-  outcome: 'pending' | 'achieved' | 'missed';
+  outcome: 'pending' | 'achieved' | 'missed' | 'not_applicable';
   created_at: string;
   updated_at: string;
   closed_at: string | null;
@@ -59,15 +59,30 @@ type RankingRow = {
   updated_at: string;
 };
 
+type GamificationRuleRow = {
+  position: number;
+  title: string;
+  description: string;
+  icon_name: string;
+};
+
+type GamificationRuleInput = {
+  position: number;
+  title: string;
+  description: string;
+  iconName: string;
+};
+
 type GamificationInput = {
   title: string;
   description: string;
   startAt: string;
   endAt: string;
-  goalValue: number;
+  goalValue: number | null;
   valuePrecision: number;
-  goalUnit: string;
+  goalUnit: string | null;
   maxLiveRanking: number;
+  rules?: GamificationRuleInput[];
 };
 
 type RankingInput = { externalParticipantId: string; fullName: string; scoreValue: number };
@@ -79,6 +94,7 @@ const minLiveRankingEntries = 3;
 const maxScaledValue = 9_000_000_000_000;
 const maxTitleLength = 160;
 const maxDescriptionLength = 20_000;
+const maxRuleDescriptionLength = 2_000;
 const allowedDescriptionTags = ['p', 'h2', 'h3', 'strong', 'em', 'u', 's', 'ul', 'ol', 'li', 'blockquote', 'br', 'a'];
 const immutableImageCacheControl = 'public, max-age=31536000, immutable';
 
@@ -145,7 +161,7 @@ export const registerGamificationRoutes = (
       return c.json({ error: 'Gamification not found.' }, 404);
     }
 
-    const [prizeResult, rankingResult] = await Promise.all([
+    const [prizeResult, rankingResult, ruleResult] = await Promise.all([
       c.env.DB.prepare(
         `SELECT id, public_id, gamification_id, name, picture_key, sort_order, ranking_position, estimated_value_cents,
                 created_at, updated_at
@@ -161,6 +177,12 @@ export const registerGamificationRoutes = (
       )
         .bind(gamification.id)
         .all<RankingRow>(),
+      c.env.DB.prepare(
+        `SELECT position, title, description, icon_name
+         FROM gamification_rules WHERE gamification_id = ? ORDER BY position ASC`,
+      )
+        .bind(gamification.id)
+        .all<GamificationRuleRow>(),
     ]);
 
     return c.json({
@@ -169,6 +191,7 @@ export const registerGamificationRoutes = (
         ...serializeGamification(gamification, c.env, c.req.url),
         prizes: prizeResult.results.map((row: PrizeRow) => serializePrize(row, c.env, c.req.url)),
         ranking: rankingResult.results.map((row: RankingRow) => serializeRanking(row, gamification.value_precision, c.env, c.req.url)),
+        rules: ruleResult.results.map(serializeGamificationRule),
       },
     });
   });
@@ -205,6 +228,9 @@ export const registerGamificationRoutes = (
       .run();
 
     const gamification = await findGamification(c.env.DB, publicId);
+    if (parsed.value.rules?.length) {
+      await c.env.DB.batch(ruleInsertStatements(c.env.DB, gamification!.id, parsed.value.rules));
+    }
     return c.json({ ok: true, gamification: serializeGamification(gamification!, c.env, c.req.url) }, 201);
   });
 
@@ -228,25 +254,37 @@ export const registerGamificationRoutes = (
 
     const parsed = parseGamificationInput(body, gamification);
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const outcome = gamification.status === 'closed'
+      ? await outcomeForGoal(c.env.DB, gamification.id, parsed.value.goalValue)
+      : gamification.outcome;
 
-    await c.env.DB.prepare(
-      `UPDATE gamifications
-       SET title = ?, description = ?, start_at = ?, end_at = ?, goal_value = ?, value_precision = ?, goal_unit = ?, max_live_ranking = ?,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-    )
-      .bind(
-        parsed.value.title,
-        parsed.value.description,
-        parsed.value.startAt,
-        parsed.value.endAt,
-        parsed.value.goalValue,
-        parsed.value.valuePrecision,
-        parsed.value.goalUnit,
-        parsed.value.maxLiveRanking,
-        gamification.id,
+    const statements = [
+      c.env.DB.prepare(
+        `UPDATE gamifications
+         SET title = ?, description = ?, start_at = ?, end_at = ?, goal_value = ?, value_precision = ?, goal_unit = ?, max_live_ranking = ?,
+             outcome = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
       )
-      .run();
+        .bind(
+          parsed.value.title,
+          parsed.value.description,
+          parsed.value.startAt,
+          parsed.value.endAt,
+          parsed.value.goalValue,
+          parsed.value.valuePrecision,
+          parsed.value.goalUnit,
+          parsed.value.maxLiveRanking,
+          outcome,
+          gamification.id,
+        ),
+    ];
+    if (parsed.value.rules !== undefined) {
+      statements.push(
+        c.env.DB.prepare('DELETE FROM gamification_rules WHERE gamification_id = ?').bind(gamification.id),
+        ...ruleInsertStatements(c.env.DB, gamification.id, parsed.value.rules),
+      );
+    }
+    await c.env.DB.batch(statements);
 
     const updated = await findGamification(c.env.DB, gamification.public_id);
     return c.json({ ok: true, gamification: serializeGamification(updated!, c.env, c.req.url) });
@@ -656,6 +694,16 @@ const rankingCount = async (db: D1Database, gamificationId: number): Promise<num
   (await db.prepare('SELECT COUNT(*) AS count FROM rankings WHERE gamification_id = ?').bind(gamificationId).first<{ count: number }>())
     ?.count ?? 0;
 
+const outcomeForGoal = async (
+  db: D1Database,
+  gamificationId: number,
+  goalValue: number | null,
+): Promise<GamificationRow['outcome']> => {
+  if (goalValue === null) return 'not_applicable';
+  const total = (await db.prepare('SELECT COALESCE(SUM(score_value), 0) AS total FROM rankings WHERE gamification_id = ?').bind(gamificationId).first<{ total: number }>())?.total ?? 0;
+  return total >= goalValue ? 'achieved' : 'missed';
+};
+
 const findRanking = (db: D1Database, gamificationId: number, externalParticipantId: string): Promise<RankingRow | null> =>
   db
     .prepare(
@@ -683,7 +731,7 @@ const parseGamificationInput = (
   const title = readString(body, 'title', maxTitleLength, existing?.title);
   const rawDescription = readString(body, 'description', maxDescriptionLength, existing?.description);
   const description = rawDescription === null ? null : sanitizeDescription(rawDescription);
-  const goalUnit = readString(body, 'goalUnit', 40, existing?.goal_unit);
+  const goalUnit = readOptionalString(body, 'goalUnit', 40, existing?.goal_unit);
   const valuePrecision = readInteger(body, 'valuePrecision', 0, 6, existing?.value_precision);
   const maxLiveRanking = readInteger(
     body,
@@ -694,19 +742,49 @@ const parseGamificationInput = (
   );
   const startAt = readIsoDate(body['startAt'], existing?.start_at);
   const endAt = readIsoDate(body['endAt'], existing?.end_at);
+  const rules = parseGamificationRules(body['rules']);
 
   if (
-    !title || !description || goalUnit === null || typeof valuePrecision !== 'number' || typeof maxLiveRanking !== 'number' || !startAt || !endAt
+    !title || !description || goalUnit === undefined || typeof valuePrecision !== 'number' || typeof maxLiveRanking !== 'number' || !startAt || !endAt
   ) {
-    return { ok: false, error: 'Title, description, dates, goal, value precision and goal unit are required.' };
+    return { ok: false, error: 'Title, description, dates, value precision and live ranking are required.' };
   }
   if (endAt <= startAt) return { ok: false, error: 'End date must be after start date.' };
+  if (!rules.ok) return rules;
 
-  const defaultGoal = existing ? trimDecimalZeros(formatDecimal(existing.goal_value, existing.value_precision)) : undefined;
-  const goalValue = parseDecimal(body['goal'] === undefined ? defaultGoal : body['goal'], valuePrecision);
-  if (goalValue === null) return { ok: false, error: 'Goal must be a non-negative decimal matching value precision.' };
+  const defaultGoal = existing?.goal_value === null || existing === undefined
+    ? null
+    : trimDecimalZeros(formatDecimal(existing.goal_value, existing.value_precision));
+  const goalValue = parseOptionalDecimal(body['goal'] === undefined ? defaultGoal : body['goal'], valuePrecision);
+  if (goalValue === undefined) return { ok: false, error: 'Goal must be a non-negative decimal matching value precision.' };
 
-  return { ok: true, value: { title, description, startAt, endAt, goalValue, valuePrecision, goalUnit, maxLiveRanking } };
+  return { ok: true, value: { title, description, startAt, endAt, goalValue, valuePrecision, goalUnit, maxLiveRanking, rules: rules.value } };
+};
+
+const parseGamificationRules = (
+  raw: unknown,
+): { ok: true; value: GamificationRuleInput[] | undefined } | { ok: false; error: string } => {
+  if (raw === undefined) return { ok: true, value: undefined };
+  if (!Array.isArray(raw)) return { ok: false, error: 'Rules must be an array.' };
+
+  const positions = new Set<number>();
+  const rules: GamificationRuleInput[] = [];
+  for (const item of raw) {
+    if (!isRecord(item)) return { ok: false, error: 'Each rule is invalid.' };
+    const position = readInteger(item, 'position', 1, Number.MAX_SAFE_INTEGER);
+    const title = readString(item, 'title', maxTitleLength);
+    const description = readString(item, 'description', maxRuleDescriptionLength);
+    const iconName = readString(item, 'iconName', 120);
+    if (
+      typeof position !== 'number' || !title || !description || !iconName
+      || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(iconName) || positions.has(position)
+    ) {
+      return { ok: false, error: 'Rules require unique positions, title, description and a valid Lucide icon name.' };
+    }
+    positions.add(position);
+    rules.push({ position, title, description, iconName });
+  }
+  return { ok: true, value: rules };
 };
 
 const sanitizeDescription = (value: string): string | null => {
@@ -783,6 +861,19 @@ const readString = (
   return value && value.length <= maxLength ? value : null;
 };
 
+const readOptionalString = (
+  body: Record<string, unknown>,
+  key: string,
+  maxLength: number,
+  fallback?: string | null,
+): string | null | undefined => {
+  const raw = body[key] === undefined ? (fallback ?? null) : body[key];
+  if (raw === null) return null;
+  if (typeof raw !== 'string') return undefined;
+  const value = raw.trim();
+  return value ? (value.length <= maxLength ? value : undefined) : null;
+};
+
 const readInteger = (
   body: Record<string, unknown>,
   key: string,
@@ -812,6 +903,11 @@ const parseDecimal = (raw: unknown, precision: number): number | null => {
   return Number.isSafeInteger(value) && value >= 0 && value <= maxScaledValue ? value : null;
 };
 
+const parseOptionalDecimal = (raw: unknown, precision: number): number | null | undefined => {
+  if (raw === null || raw === undefined || (typeof raw === 'string' && !raw.trim())) return null;
+  return parseDecimal(raw, precision) ?? undefined;
+};
+
 const parseEuroAmount = (raw: unknown): number | null | undefined => {
   if (raw === null) return null;
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return undefined;
@@ -835,7 +931,7 @@ const serializeGamification = (row: GamificationRow, env: Env, requestUrl?: stri
   imageUrl: row.image_key ? assetUrl(env, row.image_key, requestUrl) : null,
   startAt: row.start_at,
   endAt: row.end_at,
-  goal: formatDecimal(row.goal_value, row.value_precision),
+  goal: row.goal_value === null ? null : formatDecimal(row.goal_value, row.value_precision),
   valuePrecision: row.value_precision,
   goalUnit: row.goal_unit,
   maxLiveRanking: row.max_live_ranking,
@@ -844,6 +940,13 @@ const serializeGamification = (row: GamificationRow, env: Env, requestUrl?: stri
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   actualEndAt: row.actual_end_at ?? row.closed_at,
+});
+
+const serializeGamificationRule = (row: GamificationRuleRow) => ({
+  position: row.position,
+  title: row.title,
+  description: row.description,
+  iconName: row.icon_name,
 });
 
 const serializePrize = (row: PrizeRow, env: Env, requestUrl?: string) => ({
@@ -867,6 +970,17 @@ const serializeRanking = (row: RankingRow, precision: number, env: Env, requestU
   updatedAt: row.updated_at,
 });
 
+const ruleInsertStatements = (
+  db: D1Database,
+  gamificationId: number,
+  rules: GamificationRuleInput[],
+): D1PreparedStatement[] => rules.map((rule) =>
+  db.prepare(
+    `INSERT INTO gamification_rules (gamification_id, position, title, description, icon_name)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).bind(gamificationId, rule.position, rule.title, rule.description, rule.iconName),
+);
+
 const assetUrl = (env: Env, key: string, requestUrl?: string): string => {
   const path = key.split('/').map(encodeURIComponent).join('/');
   const request = requestUrl ? new URL(requestUrl) : null;
@@ -883,6 +997,7 @@ const deactivateExpiredGamifications = (db: D1Database, actualEndAt: string): Pr
       `UPDATE gamifications
        SET status = 'closed',
            outcome = CASE
+             WHEN goal_value IS NULL THEN 'not_applicable'
              WHEN (SELECT COALESCE(SUM(r.score_value), 0) FROM rankings r WHERE r.gamification_id = gamifications.id) >= goal_value
                THEN 'achieved'
              ELSE 'missed'
@@ -899,6 +1014,7 @@ const deactivateGamification = (db: D1Database, id: number, actualEndAt: string)
       `UPDATE gamifications
        SET status = 'closed',
            outcome = CASE
+             WHEN goal_value IS NULL THEN 'not_applicable'
              WHEN (SELECT COALESCE(SUM(r.score_value), 0) FROM rankings r WHERE r.gamification_id = gamifications.id) >= goal_value
                THEN 'achieved'
              ELSE 'missed'
