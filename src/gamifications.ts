@@ -85,6 +85,48 @@ type GamificationRuleInput = {
   iconName: string;
 };
 
+type MetricCardRow = {
+  id: number;
+  public_id: string;
+  gamification_id: number;
+  title: string;
+  icon_name: string;
+  value: string;
+  subvalue: string | null;
+  progress_current: string | null;
+  progress_max: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type PromoCardRow = {
+  id: number;
+  public_id: string;
+  gamification_id: number;
+  image_id: number;
+  image_public_id: string;
+  image_key: string;
+  title: string;
+  description: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type BlockImageRow = { id: number; public_id: string; image_key: string; created_at: string };
+
+type MetricCardInput = {
+  title: string;
+  iconName: string;
+  value: string;
+  subvalue: string | null;
+  progressCurrent: string | null;
+  progressMax: string | null;
+};
+
+type PromoCardInput = { imagePublicId: string; title: string; description: string };
+
 type GamificationInput = {
   title: string;
   description: string;
@@ -115,6 +157,8 @@ const maxScaledValue = 9_000_000_000_000;
 const maxTitleLength = 160;
 const maxDescriptionLength = 20_000;
 const maxRuleDescriptionLength = 2_000;
+const maxCardValueLength = 160;
+const maxCardDescriptionLength = 2_000;
 const allowedDescriptionTags = ['p', 'h2', 'h3', 'strong', 'em', 'u', 's', 'ul', 'ol', 'li', 'blockquote', 'br', 'a'];
 const immutableImageCacheControl = 'public, max-age=31536000, immutable';
 
@@ -181,7 +225,7 @@ export const registerGamificationRoutes = (
       return c.json({ error: 'Gamification not found.' }, 404);
     }
 
-    const [prizeResult, rankingResult, ruleResult] = await Promise.all([
+    const [prizeResult, rankingResult, ruleResult, metricCardResult, promoCardResult] = await Promise.all([
       c.env.DB.prepare(
         `SELECT id, public_id, gamification_id, name, picture_key, sort_order, ranking_position, estimated_value_cents,
                 created_at, updated_at
@@ -205,6 +249,17 @@ export const registerGamificationRoutes = (
       )
         .bind(gamification.id)
         .all<GamificationRuleRow>(),
+      c.env.DB.prepare(
+        `SELECT id, public_id, gamification_id, title, icon_name, value, subvalue, progress_current, progress_max,
+                sort_order, created_at, updated_at
+         FROM gamification_metric_cards WHERE gamification_id = ? ORDER BY sort_order ASC, id ASC`,
+      ).bind(gamification.id).all<MetricCardRow>(),
+      c.env.DB.prepare(
+        `SELECT p.id, p.public_id, p.gamification_id, p.image_id, i.public_id AS image_public_id, i.image_key,
+                p.title, p.description, p.sort_order, p.created_at, p.updated_at
+         FROM gamification_promo_cards p INNER JOIN block_images i ON i.id = p.image_id
+         WHERE p.gamification_id = ? ORDER BY p.sort_order ASC, p.id ASC`,
+      ).bind(gamification.id).all<PromoCardRow>(),
     ]);
 
     return c.json({
@@ -214,6 +269,8 @@ export const registerGamificationRoutes = (
         prizes: prizeResult.results.map((row: PrizeRow) => serializePrize(row, c.env, c.req.url)),
         ranking: rankingResult.results.map((row: RankingRow) => serializeRanking(row, gamification.value_precision, c.env, c.req.url)),
         rules: ruleResult.results.map(serializeGamificationRule),
+        blockOneCards: metricCardResult.results.map(serializeMetricCard),
+        blockTwoCards: promoCardResult.results.map((row: PromoCardRow) => serializePromoCard(row, c.env, c.req.url)),
       },
     });
   });
@@ -375,6 +432,132 @@ export const registerGamificationRoutes = (
     await c.env.DB.batch([...keys.map((key) => enqueueMediaStatement(c.env.DB, key)), c.env.DB.prepare('DELETE FROM gamifications WHERE id = ?').bind(gamification.id)]);
 
     return c.json({ ok: true });
+  });
+
+  app.get('/superuser/block-images', async (c) => {
+    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
+    if (!auth.ok) return auth.response;
+    const result = await c.env.DB.prepare(
+      'SELECT id, public_id, image_key, created_at FROM block_images ORDER BY id DESC',
+    ).all<BlockImageRow>();
+    return c.json({ ok: true, images: result.results.map((row: BlockImageRow) => serializeBlockImage(row, c.env, c.req.url)) });
+  });
+
+  app.put('/superuser/block-images', async (c) => {
+    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
+    if (!auth.ok) return auth.response;
+    const image = await readWebp(c.req.raw);
+    if (!image.ok) return c.json({ error: image.error }, image.status);
+    const publicId = crypto.randomUUID();
+    const key = `block-images/${publicId}.webp`;
+    const stored = await replaceMedia(c.env, key, image.bytes, null, () =>
+      c.env.DB.prepare('INSERT INTO block_images (public_id, image_key) VALUES (?, ?)').bind(publicId, key),
+    );
+    if (!stored.ok) return c.json({ error: stored.error }, 500);
+    const row = await findBlockImage(c.env.DB, publicId);
+    return c.json({ ok: true, image: serializeBlockImage(row!, c.env, c.req.url) }, 201);
+  });
+
+  app.post('/superuser/gamifications/:gamificationPublicId/block-one-cards', async (c) => {
+    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
+    if (!auth.ok) return auth.response;
+    const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
+    if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
+    const parsed = parseMetricCardInput(await readJson(c.req.raw));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const sortOrder = await nextCardOrder(c.env.DB, 'gamification_metric_cards', gamification.id);
+    const publicId = crypto.randomUUID();
+    await c.env.DB.prepare(
+      `INSERT INTO gamification_metric_cards
+       (public_id, gamification_id, title, icon_name, value, subvalue, progress_current, progress_max, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(publicId, gamification.id, parsed.value.title, parsed.value.iconName, parsed.value.value, parsed.value.subvalue, parsed.value.progressCurrent, parsed.value.progressMax, sortOrder).run();
+    return c.json({ ok: true, card: serializeMetricCard((await findMetricCard(c.env.DB, publicId))!) }, 201);
+  });
+
+  app.patch('/superuser/block-one-cards/:cardPublicId', async (c) => {
+    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
+    if (!auth.ok) return auth.response;
+    const card = await findMetricCard(c.env.DB, c.req.param('cardPublicId'));
+    if (!card) return c.json({ error: 'Block card not found.' }, 404);
+    const parsed = parseMetricCardInput(await readJson(c.req.raw), card);
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    await c.env.DB.prepare(
+      `UPDATE gamification_metric_cards SET title = ?, icon_name = ?, value = ?, subvalue = ?, progress_current = ?, progress_max = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    ).bind(parsed.value.title, parsed.value.iconName, parsed.value.value, parsed.value.subvalue, parsed.value.progressCurrent, parsed.value.progressMax, card.id).run();
+    return c.json({ ok: true, card: serializeMetricCard((await findMetricCard(c.env.DB, card.public_id))!) });
+  });
+
+  app.delete('/superuser/block-one-cards/:cardPublicId', async (c) => {
+    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
+    if (!auth.ok) return auth.response;
+    const card = await findMetricCard(c.env.DB, c.req.param('cardPublicId'));
+    if (!card) return c.json({ error: 'Block card not found.' }, 404);
+    await c.env.DB.prepare('DELETE FROM gamification_metric_cards WHERE id = ?').bind(card.id).run();
+    return c.json({ ok: true });
+  });
+
+  app.put('/superuser/gamifications/:gamificationPublicId/block-one-cards/order', async (c) => {
+    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
+    if (!auth.ok) return auth.response;
+    const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
+    if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
+    const orderedIds = parseOrderInput(await readJson(c.req.raw));
+    if (!orderedIds) return c.json({ error: 'Card order is invalid.' }, 400);
+    const reordered = await reorderCards(c.env.DB, 'gamification_metric_cards', gamification.id, orderedIds);
+    return reordered ? c.json({ ok: true }) : c.json({ error: 'Card order must contain every card exactly once.' }, 400);
+  });
+
+  app.post('/superuser/gamifications/:gamificationPublicId/block-two-cards', async (c) => {
+    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
+    if (!auth.ok) return auth.response;
+    const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
+    if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
+    const parsed = parsePromoCardInput(await readJson(c.req.raw));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const image = await findBlockImage(c.env.DB, parsed.value.imagePublicId);
+    if (!image) return c.json({ error: 'Block image not found.' }, 404);
+    const sortOrder = await nextCardOrder(c.env.DB, 'gamification_promo_cards', gamification.id);
+    const publicId = crypto.randomUUID();
+    await c.env.DB.prepare(
+      'INSERT INTO gamification_promo_cards (public_id, gamification_id, image_id, title, description, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
+    ).bind(publicId, gamification.id, image.id, parsed.value.title, parsed.value.description, sortOrder).run();
+    return c.json({ ok: true, card: serializePromoCard((await findPromoCard(c.env.DB, publicId))!, c.env, c.req.url) }, 201);
+  });
+
+  app.patch('/superuser/block-two-cards/:cardPublicId', async (c) => {
+    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
+    if (!auth.ok) return auth.response;
+    const card = await findPromoCard(c.env.DB, c.req.param('cardPublicId'));
+    if (!card) return c.json({ error: 'Block card not found.' }, 404);
+    const parsed = parsePromoCardInput(await readJson(c.req.raw), card);
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const image = await findBlockImage(c.env.DB, parsed.value.imagePublicId);
+    if (!image) return c.json({ error: 'Block image not found.' }, 404);
+    await c.env.DB.prepare(
+      'UPDATE gamification_promo_cards SET image_id = ?, title = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    ).bind(image.id, parsed.value.title, parsed.value.description, card.id).run();
+    return c.json({ ok: true, card: serializePromoCard((await findPromoCard(c.env.DB, card.public_id))!, c.env, c.req.url) });
+  });
+
+  app.delete('/superuser/block-two-cards/:cardPublicId', async (c) => {
+    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
+    if (!auth.ok) return auth.response;
+    const card = await findPromoCard(c.env.DB, c.req.param('cardPublicId'));
+    if (!card) return c.json({ error: 'Block card not found.' }, 404);
+    await c.env.DB.prepare('DELETE FROM gamification_promo_cards WHERE id = ?').bind(card.id).run();
+    return c.json({ ok: true });
+  });
+
+  app.put('/superuser/gamifications/:gamificationPublicId/block-two-cards/order', async (c) => {
+    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
+    if (!auth.ok) return auth.response;
+    const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
+    if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
+    const orderedIds = parseOrderInput(await readJson(c.req.raw));
+    if (!orderedIds) return c.json({ error: 'Card order is invalid.' }, 400);
+    const reordered = await reorderCards(c.env.DB, 'gamification_promo_cards', gamification.id, orderedIds);
+    return reordered ? c.json({ ok: true }) : c.json({ error: 'Card order must contain every card exactly once.' }, 400);
   });
 
   app.post('/superuser/gamifications/:gamificationPublicId/prizes', async (c) => {
@@ -750,6 +933,44 @@ const findPrizeWithGamification = (db: D1Database, publicId: string): Promise<Pr
     .bind(publicId)
     .first<PrizeWithGamification>();
 
+const findBlockImage = (db: D1Database, publicId: string): Promise<BlockImageRow | null> =>
+  db.prepare('SELECT id, public_id, image_key, created_at FROM block_images WHERE public_id = ? LIMIT 1').bind(publicId).first<BlockImageRow>();
+
+const findMetricCard = (db: D1Database, publicId: string): Promise<MetricCardRow | null> =>
+  db.prepare(
+    `SELECT id, public_id, gamification_id, title, icon_name, value, subvalue, progress_current, progress_max,
+            sort_order, created_at, updated_at FROM gamification_metric_cards WHERE public_id = ? LIMIT 1`,
+  ).bind(publicId).first<MetricCardRow>();
+
+const promoCardSelect = `SELECT p.id, p.public_id, p.gamification_id, p.image_id, i.public_id AS image_public_id, i.image_key,
+  p.title, p.description, p.sort_order, p.created_at, p.updated_at
+  FROM gamification_promo_cards p INNER JOIN block_images i ON i.id = p.image_id`;
+
+const findPromoCard = (db: D1Database, publicId: string): Promise<PromoCardRow | null> =>
+  db.prepare(`${promoCardSelect} WHERE p.public_id = ? LIMIT 1`).bind(publicId).first<PromoCardRow>();
+
+const nextCardOrder = async (db: D1Database, table: 'gamification_metric_cards' | 'gamification_promo_cards', gamificationId: number): Promise<number> =>
+  (await db.prepare(`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM ${table} WHERE gamification_id = ?`).bind(gamificationId).first<{ next_order: number }>())?.next_order ?? 0;
+
+const parseOrderInput = (body: unknown): string[] | null => {
+  if (!isRecord(body) || !Array.isArray(body['ids']) || body['ids'].some((id) => typeof id !== 'string' || !id)) return null;
+  const ids = body['ids'] as string[];
+  return new Set(ids).size === ids.length ? ids : null;
+};
+
+const reorderCards = async (
+  db: D1Database,
+  table: 'gamification_metric_cards' | 'gamification_promo_cards',
+  gamificationId: number,
+  ids: string[],
+): Promise<boolean> => {
+  const result = await db.prepare(`SELECT public_id FROM ${table} WHERE gamification_id = ?`).bind(gamificationId).all<{ public_id: string }>();
+  const existing = (result.results as Array<{ public_id: string }>).map((row: { public_id: string }) => row.public_id);
+  if (existing.length !== ids.length || !existing.every((id) => ids.includes(id))) return false;
+  await db.batch(ids.map((id, index) => db.prepare(`UPDATE ${table} SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE public_id = ? AND gamification_id = ?`).bind(index, id, gamificationId)));
+  return true;
+};
+
 const rankingCount = async (db: D1Database, gamificationId: number): Promise<number> =>
   (await db.prepare('SELECT COUNT(*) AS count FROM rankings WHERE gamification_id = ?').bind(gamificationId).first<{ count: number }>())
     ?.count ?? 0;
@@ -896,6 +1117,49 @@ const parsePrizeInput = (
     return { ok: false, error: 'Prize name, ranking position or estimated value is invalid.' };
   }
   return { ok: true, value: { name, sortOrder, rankingPosition, estimatedValueCents } };
+};
+
+const parseMetricCardInput = (
+  body: unknown,
+  existing?: MetricCardRow,
+): { ok: true; value: MetricCardInput } | { ok: false; error: string } => {
+  if (!isRecord(body)) return { ok: false, error: 'Invalid block card payload.' };
+  const title = readString(body, 'title', maxTitleLength, existing?.title);
+  const iconName = readString(body, 'iconName', 80, existing?.icon_name);
+  const value = readString(body, 'value', maxCardValueLength, existing?.value);
+  const subvalue = readOptionalString(body, 'subvalue', maxCardValueLength, existing?.subvalue);
+  const hasProgress = body['hasProgress'] === undefined
+    ? existing?.progress_current !== null
+    : body['hasProgress'] === true;
+  if (title === null || iconName === null || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(iconName) || value === null || subvalue === undefined) {
+    return { ok: false, error: 'Block card title, icon, value or subvalue is invalid.' };
+  }
+  if (!hasProgress) return { ok: true, value: { title, iconName, value, subvalue, progressCurrent: null, progressMax: null } };
+  const progressCurrent = readCardDecimal(body['currentValue'] === undefined ? existing?.progress_current : body['currentValue']);
+  const progressMax = readCardDecimal(body['maxValue'] === undefined ? existing?.progress_max : body['maxValue']);
+  if (progressCurrent === null || progressMax === null || Number(progressMax) <= 0) {
+    return { ok: false, error: 'Progress requires a non-negative current value and a positive maximum value.' };
+  }
+  return { ok: true, value: { title, iconName, value, subvalue, progressCurrent, progressMax } };
+};
+
+const parsePromoCardInput = (
+  body: unknown,
+  existing?: PromoCardRow,
+): { ok: true; value: PromoCardInput } | { ok: false; error: string } => {
+  if (!isRecord(body)) return { ok: false, error: 'Invalid promotion card payload.' };
+  const imagePublicId = readString(body, 'imagePublicId', 64, existing?.image_public_id);
+  const title = readString(body, 'title', maxTitleLength, existing?.title);
+  const description = readString(body, 'description', maxCardDescriptionLength, existing?.description);
+  return imagePublicId && title && description
+    ? { ok: true, value: { imagePublicId, title, description } }
+    : { ok: false, error: 'Promotion cards require an image, title and description.' };
+};
+
+const readCardDecimal = (raw: unknown): string | null => {
+  if (typeof raw !== 'string' || !/^\d+(?:\.\d+)?$/.test(raw.trim()) || raw.trim().length > 32) return null;
+  const value = Number(raw.trim());
+  return Number.isFinite(value) && value >= 0 ? raw.trim() : null;
 };
 
 const parseRankingInput = (
@@ -1085,6 +1349,32 @@ const serializeGamificationRule = (row: GamificationRuleRow) => ({
   title: row.title,
   description: row.description,
   iconName: row.icon_name,
+});
+
+const serializeMetricCard = (row: MetricCardRow) => ({
+  publicId: row.public_id,
+  title: row.title,
+  iconName: row.icon_name,
+  value: row.value,
+  subvalue: row.subvalue,
+  progressCurrent: row.progress_current,
+  progressMax: row.progress_max,
+  sortOrder: row.sort_order,
+});
+
+const serializeBlockImage = (row: BlockImageRow, env: Env, requestUrl?: string) => ({
+  publicId: row.public_id,
+  imageUrl: assetUrl(env, row.image_key, requestUrl),
+  createdAt: row.created_at,
+});
+
+const serializePromoCard = (row: PromoCardRow, env: Env, requestUrl?: string) => ({
+  publicId: row.public_id,
+  imagePublicId: row.image_public_id,
+  imageUrl: assetUrl(env, row.image_key, requestUrl),
+  title: row.title,
+  description: row.description,
+  sortOrder: row.sort_order,
 });
 
 const serializePrize = (row: PrizeRow, env: Env, requestUrl?: string) => ({

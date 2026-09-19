@@ -209,6 +209,38 @@ describe('gamification API', () => {
     expect(invalidAmount.status).toBe(400);
   });
 
+  it('stores ordered configurable blocks and reuses global block images', async () => {
+    const cookie = await login('OWNER-LOCAL-2026');
+    const gamification = await createGamification(cookie, demoCompanyId, 'Blocks');
+    const first = await request(`/superuser/gamifications/${gamification.publicId}/block-one-cards`, cookie, {
+      method: 'POST', json: { title: 'Objetivo mensual', iconName: 'target', value: '75', subvalue: 'Ventas', hasProgress: true, currentValue: '50', maxValue: '75' },
+    });
+    expect(first.status).toBe(201);
+    const firstCard = ((await first.json()) as { card: { publicId: string } }).card;
+    const second = await request(`/superuser/gamifications/${gamification.publicId}/block-one-cards`, cookie, {
+      method: 'POST', json: { title: 'Puntos', iconName: 'star', value: '120', subvalue: null, hasProgress: false },
+    });
+    const secondCard = ((await second.json()) as { card: { publicId: string } }).card;
+    expect((await request(`/superuser/gamifications/${gamification.publicId}/block-one-cards/order`, cookie, {
+      method: 'PUT', json: { ids: [secondCard.publicId, firstCard.publicId] },
+    })).status).toBe(200);
+
+    const uploaded = await request('/superuser/block-images', cookie, { method: 'PUT', body: webp(80, 80), contentType: 'image/webp' });
+    expect(uploaded.status).toBe(201);
+    const image = ((await uploaded.json()) as { image: { publicId: string } }).image;
+    const promo = await request(`/superuser/gamifications/${gamification.publicId}/block-two-cards`, cookie, {
+      method: 'POST', json: { imagePublicId: image.publicId, title: 'Premio mensual', description: 'Cena para primera posición.' },
+    });
+    expect(promo.status).toBe(201);
+
+    const detail = await request(`/companies/${demoCompanyId}/gamifications/${gamification.publicId}`, cookie);
+    const body = (await detail.json()) as { gamification: { blockOneCards: Array<{ title: string; progressCurrent: string | null }>; blockTwoCards: Array<{ imagePublicId: string }> } };
+    expect(body.gamification.blockOneCards.map((card) => card.title)).toEqual(['Puntos', 'Objetivo mensual']);
+    expect(body.gamification.blockOneCards[1].progressCurrent).toBe('50');
+    expect(body.gamification.blockTwoCards).toEqual([expect.objectContaining({ imagePublicId: image.publicId })]);
+    expect((await request('/superuser/block-images', cookie)).status).toBe(200);
+  });
+
   it('supports overlapping active gamifications', async () => {
     const cookie = await login('OWNER-LOCAL-2026');
     const first = await createGamification(cookie, demoCompanyId, 'First');

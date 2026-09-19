@@ -96,6 +96,58 @@ export const gamificationRules = sqliteTable(
   ],
 );
 
+export const blockImages = sqliteTable(
+  'block_images',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    publicId: text('public_id').notNull(),
+    imageKey: text('image_key').notNull(),
+    createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [uniqueIndex('block_images_public_id_unique').on(table.publicId)],
+);
+
+export const gamificationMetricCards = sqliteTable(
+  'gamification_metric_cards',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    publicId: text('public_id').notNull(),
+    gamificationId: integer('gamification_id').notNull().references(() => gamifications.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    iconName: text('icon_name').notNull(),
+    value: text('value').notNull(),
+    subvalue: text('subvalue'),
+    progressCurrent: text('progress_current'),
+    progressMax: text('progress_max'),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex('gamification_metric_cards_public_id_unique').on(table.publicId),
+    index('gamification_metric_cards_order_idx').on(table.gamificationId, table.sortOrder),
+  ],
+);
+
+export const gamificationPromoCards = sqliteTable(
+  'gamification_promo_cards',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    publicId: text('public_id').notNull(),
+    gamificationId: integer('gamification_id').notNull().references(() => gamifications.id, { onDelete: 'cascade' }),
+    imageId: integer('image_id').notNull().references(() => blockImages.id),
+    title: text('title').notNull(),
+    description: text('description').notNull(),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex('gamification_promo_cards_public_id_unique').on(table.publicId),
+    index('gamification_promo_cards_order_idx').on(table.gamificationId, table.sortOrder),
+  ],
+);
+
 export const prizes = sqliteTable(
   'prizes',
   {
