@@ -50,6 +50,15 @@ INSERT INTO gamifications (
     NULL, '2026-09-01T00:00:00.000Z', '2027-01-31T23:59:59.000Z', 1200000, 2, 'EUR en ventas', 5, 'active', 'pending', NULL, NULL
   );
 
+INSERT INTO gamification_metric_cards (
+  public_id, gamification_id, title, icon_name, value, subvalue,
+  progress_current, progress_max, sort_order
+) VALUES
+  ('b2000000-0000-4000-8000-000000000001', (SELECT id FROM gamifications WHERE public_id = 'b1000000-0000-4000-8000-000000000001'), 'Objetivo mensual', 'target', '75.000 €', '62.450 € (83%)', '62450', '75000', 0),
+  ('b2000000-0000-4000-8000-000000000002', (SELECT id FROM gamifications WHERE public_id = 'b1000000-0000-4000-8000-000000000001'), 'Ventas totales', 'trending-up', '62.450 €', '↑ 18% vs Abril', NULL, NULL, 1),
+  ('b2000000-0000-4000-8000-000000000003', (SELECT id FROM gamifications WHERE public_id = 'b1000000-0000-4000-8000-000000000001'), 'Logros desbloqueados', 'award', '12', '¡Sigue así!', NULL, NULL, 2),
+  ('b2000000-0000-4000-8000-000000000004', (SELECT id FROM gamifications WHERE public_id = 'b1000000-0000-4000-8000-000000000001'), 'Puntos totales', 'star', '18.750', '↑ 1.250 esta semana', NULL, NULL, 3);
+
 INSERT INTO gamification_rules (gamification_id, position, title, description, icon_name) VALUES
   ((SELECT id FROM gamifications WHERE public_id = 'b1000000-0000-4000-8000-000000000001'), 1, 'Ventas cerradas', 'Suma puntos por cada venta realizada.', 'chart-column'),
   ((SELECT id FROM gamifications WHERE public_id = 'b1000000-0000-4000-8000-000000000001'), 2, 'Productos estratégicos', 'Multiplica tus puntos al vender productos clave.', 'award'),
