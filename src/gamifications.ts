@@ -148,6 +148,10 @@ type RankingInput = {
 
 const maxImageBytes = 2 * 1024 * 1024;
 const maxImageDimension = 2400;
+const maxBlockImageInputBytes = 10 * 1024 * 1024;
+const maxBlockImageBytes = 256 * 1024;
+const blockImageDimension = 128;
+const blockImageContentTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const maxRankingEntries = 1000;
 const maxRankingFieldHeaders = 30;
 const maxRankingFieldHeaderLength = 80;
@@ -446,7 +450,7 @@ export const registerGamificationRoutes = (
   app.put('/superuser/block-images', async (c) => {
     const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
     if (!auth.ok) return auth.response;
-    const image = await readWebp(c.req.raw);
+    const image = await readBlockImage(c.req.raw, c.env);
     if (!image.ok) return c.json({ error: image.error }, image.status);
     const publicId = crypto.randomUUID();
     const key = `block-images/${publicId}.webp`;
@@ -1533,6 +1537,89 @@ const readWebp = async (
   if (!dimensions) return { ok: false, status: 415, error: 'Body is not a valid supported WebP image.' };
   if (dimensions.width > maxImageDimension || dimensions.height > maxImageDimension) {
     return { ok: false, status: 422, error: 'Image dimensions exceed 2400 pixels.' };
+  }
+  return { ok: true, bytes };
+};
+
+const readBlockImage = async (
+  request: Request,
+  env: Env,
+): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; status: 413 | 415 | 422 | 503; error: string }> => {
+  const contentType = request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+  if (!contentType || !blockImageContentTypes.has(contentType)) {
+    return { ok: false, status: 415, error: 'Block images must be JPEG, PNG, or WebP.' };
+  }
+
+  const source = await readImageBytes(request, maxBlockImageInputBytes);
+  if (!source.ok) return source;
+
+  // Cloudflare Images is unavailable in Miniflare. Keep existing WebP fixtures usable locally;
+  // deployed Workers always have the IMAGES binding declared in wrangler.jsonc.
+  if (!env.IMAGES) {
+    if (contentType !== 'image/webp') {
+      return { ok: false, status: 503, error: 'Block image conversion is unavailable in this environment.' };
+    }
+    return { ok: true, bytes: source.bytes };
+  }
+
+  try {
+    const sourceStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(source.bytes);
+        controller.close();
+      },
+    });
+    const output = await env.IMAGES
+      .input(sourceStream)
+      .transform({ width: blockImageDimension, height: blockImageDimension, fit: 'cover' })
+      .output({ format: 'image/webp', quality: 75, anim: false });
+    const response = output.response();
+    if (!response.ok) return { ok: false, status: 422, error: 'Unable to convert block image.' };
+
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const dimensions = webpDimensions(bytes);
+    if (!dimensions || dimensions.width !== blockImageDimension || dimensions.height !== blockImageDimension) {
+      return { ok: false, status: 422, error: 'Unable to convert block image.' };
+    }
+    if (bytes.byteLength > maxBlockImageBytes) {
+      return { ok: false, status: 422, error: 'Converted block image exceeds the 256 KB limit.' };
+    }
+    return { ok: true, bytes };
+  } catch (error) {
+    logError('Block image conversion error', error);
+    return { ok: false, status: 422, error: 'Unable to convert block image.' };
+  }
+};
+
+const readImageBytes = async (
+  request: Request,
+  maximumBytes: number,
+): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; status: 413 | 415; error: string }> => {
+  const declaredLength = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+    return { ok: false, status: 413, error: `Image exceeds the ${maximumBytes / 1024 / 1024} MB limit.` };
+  }
+  if (!request.body) return { ok: false, status: 415, error: 'Image body is required.' };
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  while (true) {
+    const result = await reader.read();
+    if (result.done) break;
+    totalBytes += result.value.byteLength;
+    if (totalBytes > maximumBytes) {
+      await reader.cancel(`Image exceeds the ${maximumBytes / 1024 / 1024} MB limit.`);
+      return { ok: false, status: 413, error: `Image exceeds the ${maximumBytes / 1024 / 1024} MB limit.` };
+    }
+    chunks.push(result.value);
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
   }
   return { ok: true, bytes };
 };

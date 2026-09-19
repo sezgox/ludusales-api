@@ -11,10 +11,12 @@ const baseEnv = {
 };
 
 const db = (): Env['DB'] => (env as Env).DB;
+const images = (): Env['IMAGES'] => (env as Env).IMAGES;
 const authEnv = (): Env => ({
   ...baseEnv,
   DB: db(),
   MEDIA_BUCKET: (env as Env).MEDIA_BUCKET,
+  IMAGES: images(),
   ASSET_BASE_URL: 'https://assets.ludusales.com',
 });
 

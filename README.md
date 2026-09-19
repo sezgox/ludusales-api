@@ -120,8 +120,9 @@ caso pasa a `missed`. Las inactivas siguen siendo editables y pueden reactivarse
 ya venció, la activación requiere una nueva fecha futura. El cron `*/5 * * * *` desactiva las activas
 vencidas y limpia R2.
 
-Las rutas de imagen reciben el WebP como cuerpo binario con `Content-Type: image/webp`. Límite:
-2 MB y 2400 px por dimensión. La conversión debe realizarse en el navegador antes de subir.
+Las rutas de imagen reciben WebP como cuerpo binario con `Content-Type: image/webp`. Límite:
+2 MB y 2400 px por dimensión. `PUT /superuser/block-images` también admite JPEG y PNG; el Worker
+los recorta a 128 × 128 px y convierte a WebP (calidad 75, máximo 256 KB) antes de guardarlos en R2.
 
 ## Desarrollo Local
 

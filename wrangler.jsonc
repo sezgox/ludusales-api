@@ -21,6 +21,9 @@
 			"bucket_name": "ludusales-images"
 		}
 	],
+	"images": {
+		"binding": "IMAGES"
+	},
 	"triggers": {
 		"crons": ["*/5 * * * *"]
 	},
