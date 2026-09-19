@@ -49,6 +49,7 @@ export const gamifications = sqliteTable(
     valuePrecision: integer('value_precision').notNull(),
     goalUnit: text('goal_unit'),
     maxLiveRanking: integer('max_live_ranking').notNull().default(5),
+    rankingFieldHeadersJson: text('ranking_field_headers_json').notNull().default('[]'),
     status: text('status', { enum: ['draft', 'active', 'closed'] }).notNull().default('draft'),
     outcome: text('outcome', { enum: ['pending', 'achieved', 'missed', 'not_applicable'] }).notNull().default('pending'),
     createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -128,17 +129,37 @@ export const rankings = sqliteTable(
     gamificationId: integer('gamification_id')
       .notNull()
       .references(() => gamifications.id, { onDelete: 'cascade' }),
-    externalParticipantId: text('external_participant_id').notNull(),
-    fullName: text('full_name').notNull(),
-    pictureKey: text('picture_key'),
+    participantId: integer('participant_id')
+      .notNull()
+      .references(() => participants.id, { onDelete: 'cascade' }),
     scoreValue: integer('score_value').notNull(),
+    customFieldsJson: text('custom_fields_json').notNull().default('{}'),
     createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
-    uniqueIndex('rankings_gamification_participant_unique').on(table.gamificationId, table.externalParticipantId),
+    uniqueIndex('rankings_gamification_participant_unique').on(table.gamificationId, table.participantId),
     index('rankings_gamification_score_idx').on(table.gamificationId, table.scoreValue),
     check('rankings_score_check', sql`${table.scoreValue} >= 0`),
+  ],
+);
+
+export const participants = sqliteTable(
+  'participants',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    companyId: integer('company_id')
+      .notNull()
+      .references(() => companies.id, { onDelete: 'cascade' }),
+    participantCode: text('participant_code').notNull(),
+    fullName: text('full_name').notNull(),
+    pictureKey: text('picture_key'),
+    createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex('participants_company_code_unique').on(table.companyId, table.participantCode),
+    index('participants_company_name_idx').on(table.companyId, table.fullName),
   ],
 );
 

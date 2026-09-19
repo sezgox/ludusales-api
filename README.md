@@ -12,7 +12,8 @@ El backend usa Cloudflare D1 con Drizzle ORM para los modelos mínimos de autent
 - `users`: usuarios con rol `company` o `superuser` y hash del código de acceso.
 - `gamifications`: configuración, fechas, objetivo exacto, ciclo y resultado.
 - `prizes`: premios ordenados asociados a una gamificación.
-- `rankings`: puntuaciones por participante externo; la posición se calcula al consultar.
+- `participants`: perfiles reutilizables por empresa, con código único y foto compartida.
+- `rankings`: relación participante–gamificación, score y valores dinámicos por fila; la posición se calcula al consultar.
 - `media_deletion_queue`: limpieza reintentable de objetos sustituidos o eliminados de R2.
 
 Los importes se reciben y devuelven como strings decimales. D1 guarda enteros escalados usando
@@ -96,8 +97,9 @@ Todas las operaciones bajo `/superuser` exigen rol `superuser`:
 - `PATCH|DELETE /superuser/prizes/:prizePublicId`
 - `PUT|DELETE /superuser/gamifications/:gamificationPublicId/image`
 - `PUT|DELETE /superuser/prizes/:prizePublicId/picture`
-- `PUT /superuser/gamifications/:gamificationPublicId/ranking` para reemplazo completo.
-- `PUT|DELETE /superuser/gamifications/:gamificationPublicId/ranking/:externalParticipantId` para cambios individuales.
+- `PUT /superuser/gamifications/:gamificationPublicId/ranking` para reemplazo completo mediante `fieldHeaders` y entradas con `participantCode`, `fullName`, `score` y `customFields` opcional.
+- `PUT|DELETE /superuser/gamifications/:gamificationPublicId/ranking/:participantCode` para cambios individuales.
+- `PUT|DELETE /superuser/gamifications/:gamificationPublicId/ranking/:participantCode/picture` para foto de perfil compartida por empresa.
 
 Ejemplo de creación:
 
@@ -146,6 +148,12 @@ para desarrollar o ejecutar tests.
 npm run dev
 ```
 
+La semilla local crea empresas, gamificaciones activas/finalizadas, premios y participantes compartidos entre rankings:
+
+```bash
+npm run db:reset:local
+```
+
 El frontend local llama a `http://localhost:8787`.
 
 ## Despliegue
@@ -161,6 +169,14 @@ Aplica migraciones en la DB remota:
 
 ```bash
 npx wrangler d1 migrations apply ludusales-db --remote
+```
+
+También están disponibles los scripts equivalentes:
+
+```bash
+npm run db:migrate:remote
+# Atención: borra y recrea el dataset demo remoto.
+npm run db:seed:remote
 ```
 
 Antes del primer despliegue, crea el bucket R2:

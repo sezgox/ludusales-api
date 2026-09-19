@@ -236,10 +236,11 @@ describe('gamification API', () => {
     const replace = await request(`/superuser/gamifications/${gamification.publicId}/ranking`, cookie, {
       method: 'PUT',
       json: {
+        fieldHeaders: ['Email', 'Localización'],
         entries: [
-          { externalParticipantId: 'p1', fullName: 'Ana', score: '50.25' },
-          { externalParticipantId: 'p2', fullName: 'Bea', score: '50.25' },
-          { externalParticipantId: 'p3', fullName: 'Carla', score: '20.00' },
+          { participantCode: 'p1', fullName: 'Ana', score: '50.25', customFields: { Email: 'ana@example.com', Localización: 'Valencia' } },
+          { participantCode: 'p2', fullName: 'Bea', score: '50.25' },
+          { participantCode: 'p3', fullName: 'Carla', score: '20.00' },
         ],
       },
     });
@@ -253,9 +254,11 @@ describe('gamification API', () => {
 
     const detail = await request(`/companies/${demoCompanyId}/gamifications/${gamification.publicId}`, cookie);
     const detailBody = (await detail.json()) as {
-      gamification: { ranking: Array<{ position: number; score: string; fullName: string }> };
+      gamification: { rankingFieldHeaders: string[]; ranking: Array<{ position: number; score: string; fullName: string; customFields: Record<string, string> }> };
     };
     expect(detailBody.gamification.ranking.map((entry) => entry.position)).toEqual([1, 1, 3]);
+    expect(detailBody.gamification.rankingFieldHeaders).toEqual(['Email', 'Localización']);
+    expect(detailBody.gamification.ranking[0].customFields).toEqual({ Email: 'ana@example.com', Localización: 'Valencia' });
     expect(detailBody.gamification.ranking[2]).toMatchObject({ fullName: 'Carla Ruiz', score: '25.00' });
 
     const picture = await request(`/superuser/gamifications/${gamification.publicId}/ranking/p3/picture`, cookie, {
@@ -264,8 +267,8 @@ describe('gamification API', () => {
     expect(picture.status).toBe(200);
     const withPicture = await request(`/companies/${demoCompanyId}/gamifications/${gamification.publicId}`, cookie);
     const picturedEntry = ((await withPicture.json()) as {
-      gamification: { ranking: Array<{ externalParticipantId: string; pictureUrl: string | null }> };
-    }).gamification.ranking.find((entry) => entry.externalParticipantId === 'p3');
+      gamification: { ranking: Array<{ participantCode: string; pictureUrl: string | null }> };
+    }).gamification.ranking.find((entry) => entry.participantCode === 'p3');
     expect(picturedEntry?.pictureUrl).toContain('/participants/p3/');
 
     expect((await request(`/superuser/gamifications/${gamification.publicId}/ranking/p3/picture`, cookie, { method: 'DELETE' })).status).toBe(200);
@@ -280,6 +283,36 @@ describe('gamification API', () => {
       json: { fullName: 'Ana', score: '60.00' },
     });
     expect(editable.status).toBe(200);
+  });
+
+  it('shares participant profiles across rankings of the same company', async () => {
+    const cookie = await login('OWNER-LOCAL-2026');
+    const first = await createGamification(cookie, demoCompanyId, 'Shared profile one');
+    const second = await createGamification(cookie, demoCompanyId, 'Shared profile two');
+
+    expect((await request(`/superuser/gamifications/${first.publicId}/ranking/ana-001`, cookie, {
+      method: 'PUT', json: { fullName: 'Ana', score: '10.00' },
+    })).status).toBe(200);
+    expect((await request(`/superuser/gamifications/${second.publicId}/ranking/ana-001`, cookie, {
+      method: 'PUT', json: { fullName: 'Ana GarcÃ­a', score: '20.00' },
+    })).status).toBe(200);
+
+    const participants = await testEnv.DB.prepare(
+      `SELECT COUNT(*) AS count FROM participants
+       WHERE company_id = (SELECT id FROM companies WHERE public_id = ?) AND participant_code = ?`,
+    ).bind(demoCompanyId, 'ana-001').first<{ count: number }>();
+    expect(participants?.count).toBe(1);
+
+    const detail = await request(`/companies/${demoCompanyId}/gamifications/${first.publicId}`, cookie);
+    expect(((await detail.json()) as { gamification: { ranking: Array<{ fullName: string; score: string }> } }).gamification.ranking)
+      .toContainEqual(expect.objectContaining({ fullName: 'Ana GarcÃ­a', score: '10.00' }));
+
+    expect((await request(`/superuser/gamifications/${first.publicId}/ranking/ana-002`, cookie, {
+      method: 'PUT', json: { fullName: 'Ana GarcÃ­a', score: '15.00', previousParticipantCode: 'ana-001' },
+    })).status).toBe(200);
+    const renamed = await request(`/companies/${demoCompanyId}/gamifications/${second.publicId}`, cookie);
+    expect(((await renamed.json()) as { gamification: { ranking: Array<{ participantCode: string }> } }).gamification.ranking)
+      .toContainEqual(expect.objectContaining({ participantCode: 'ana-002' }));
   });
 
   it('requires a new future end date to reactivate an expired gamification', async () => {

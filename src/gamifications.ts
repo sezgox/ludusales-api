@@ -28,6 +28,7 @@ type GamificationRow = {
   value_precision: number;
   goal_unit: string | null;
   max_live_ranking: number;
+  ranking_field_headers_json: string;
   status: 'draft' | 'active' | 'closed';
   outcome: 'pending' | 'achieved' | 'missed' | 'not_applicable';
   created_at: string;
@@ -50,11 +51,22 @@ type PrizeRow = {
 };
 
 type RankingRow = {
-  external_participant_id: string;
+  participant_code: string;
   full_name: string;
   picture_key: string | null;
   score_value: number;
+  custom_fields_json: string;
   position: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type ParticipantRow = {
+  id: number;
+  company_id: number;
+  participant_code: string;
+  full_name: string;
+  picture_key: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -85,11 +97,19 @@ type GamificationInput = {
   rules?: GamificationRuleInput[];
 };
 
-type RankingInput = { externalParticipantId: string; fullName: string; scoreValue: number };
+type RankingInput = {
+  participantCode: string;
+  fullName: string;
+  scoreValue: number;
+  customFields: Record<string, string>;
+};
 
 const maxImageBytes = 2 * 1024 * 1024;
 const maxImageDimension = 2400;
 const maxRankingEntries = 1000;
+const maxRankingFieldHeaders = 30;
+const maxRankingFieldHeaderLength = 80;
+const maxRankingFieldValueLength = 500;
 const minLiveRankingEntries = 3;
 const maxScaledValue = 9_000_000_000_000;
 const maxTitleLength = 160;
@@ -170,10 +190,12 @@ export const registerGamificationRoutes = (
         .bind(gamification.id)
         .all<PrizeRow>(),
       c.env.DB.prepare(
-        `SELECT external_participant_id, full_name, picture_key, score_value, created_at, updated_at,
+        `SELECT p.participant_code, p.full_name, p.picture_key, r.score_value, r.custom_fields_json, r.created_at, r.updated_at,
                 RANK() OVER (ORDER BY score_value DESC) AS position
-         FROM rankings WHERE gamification_id = ?
-         ORDER BY score_value DESC, full_name ASC, external_participant_id ASC`,
+         FROM rankings r
+         INNER JOIN participants p ON p.id = r.participant_id
+         WHERE r.gamification_id = ?
+         ORDER BY r.score_value DESC, p.full_name ASC, p.participant_code ASC`,
       )
         .bind(gamification.id)
         .all<RankingRow>(),
@@ -343,11 +365,9 @@ export const registerGamificationRoutes = (
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
 
     const pictures = await c.env.DB.prepare(
-      `SELECT picture_key FROM prizes WHERE gamification_id = ? AND picture_key IS NOT NULL
-       UNION ALL
-       SELECT picture_key FROM rankings WHERE gamification_id = ? AND picture_key IS NOT NULL`,
+      `SELECT picture_key FROM prizes WHERE gamification_id = ? AND picture_key IS NOT NULL`,
     )
-      .bind(gamification.id, gamification.id)
+      .bind(gamification.id)
       .all<{ picture_key: string }>();
     const keys = [gamification.image_key, ...pictures.results.map((row: { picture_key: string }) => row.picture_key)].filter(
       (key): key is string => Boolean(key),
@@ -435,40 +455,40 @@ export const registerGamificationRoutes = (
     if (!isRecord(body) || !Array.isArray(body['entries']) || body['entries'].length > maxRankingEntries) {
       return c.json({ error: 'Ranking entries must be an array with at most 1000 items.' }, 400);
     }
+    const headers = parseRankingFieldHeaders(body['fieldHeaders']);
+    if (!headers.ok) return c.json({ error: headers.error }, 400);
     const entries: RankingInput[] = [];
-    const participantIds = new Set<string>();
+    const participantCodes = new Set<string>();
     for (const item of body['entries']) {
-      const parsed = parseRankingInput(item, gamification.value_precision);
+      const parsed = parseRankingInput(item, gamification.value_precision, headers.value);
       if (!parsed.ok) return c.json({ error: parsed.error }, 400);
-      if (participantIds.has(parsed.value.externalParticipantId)) {
-        return c.json({ error: 'Ranking contains duplicate external participant IDs.' }, 400);
+      if (participantCodes.has(parsed.value.participantCode)) {
+        return c.json({ error: 'Ranking contains duplicate participant codes.' }, 400);
       }
-      participantIds.add(parsed.value.externalParticipantId);
+      participantCodes.add(parsed.value.participantCode);
       entries.push(parsed.value);
     }
 
-    const existingPictures = await c.env.DB.prepare(
-      'SELECT external_participant_id, picture_key FROM rankings WHERE gamification_id = ? AND picture_key IS NOT NULL',
-    ).bind(gamification.id).all<{ external_participant_id: string; picture_key: string }>();
-    const replacementIds = new Set(entries.map((entry) => entry.externalParticipantId));
-    const retainedPictures = new Map(
-      existingPictures.results.map((row: { external_participant_id: string; picture_key: string }) => [row.external_participant_id, row.picture_key]),
-    );
     const statements = [
-      ...existingPictures.results
-        .filter((row: { external_participant_id: string; picture_key: string }) => !replacementIds.has(row.external_participant_id))
-        .map((row: { external_participant_id: string; picture_key: string }) => enqueueMediaStatement(c.env.DB, row.picture_key)),
+      c.env.DB.prepare('UPDATE gamifications SET ranking_field_headers_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+        .bind(JSON.stringify(headers.value), gamification.id),
       c.env.DB.prepare('DELETE FROM rankings WHERE gamification_id = ?').bind(gamification.id),
+      ...entries.map((entry) => c.env.DB.prepare(
+        `INSERT INTO participants (company_id, participant_code, full_name)
+         VALUES (?, ?, ?)
+         ON CONFLICT (company_id, participant_code) DO UPDATE SET
+           full_name = excluded.full_name, updated_at = CURRENT_TIMESTAMP`,
+      ).bind(gamification.company_id, entry.participantCode, entry.fullName)),
       ...entries.map((entry) =>
         c.env.DB.prepare(
-          `INSERT INTO rankings (gamification_id, external_participant_id, full_name, picture_key, score_value)
-           VALUES (?, ?, ?, ?, ?)`,
+          `INSERT INTO rankings (gamification_id, participant_id, score_value, custom_fields_json)
+           SELECT ?, id, ?, ? FROM participants WHERE company_id = ? AND participant_code = ?`,
         ).bind(
           gamification.id,
-          entry.externalParticipantId,
-          entry.fullName,
-          retainedPictures.get(entry.externalParticipantId) ?? null,
           entry.scoreValue,
+          JSON.stringify(entry.customFields),
+          gamification.company_id,
+          entry.participantCode,
         ),
       ),
     ];
@@ -476,84 +496,124 @@ export const registerGamificationRoutes = (
     return c.json({ ok: true, count: entries.length });
   });
 
-  app.put('/superuser/gamifications/:gamificationPublicId/ranking/:externalParticipantId', async (c) => {
+  app.put('/superuser/gamifications/:gamificationPublicId/ranking/:participantCode', async (c) => {
     const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
     if (!auth.ok) return auth.response;
     const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
     const body = await readJson(c.req.raw);
+    const requestedHeaders = isRecord(body) && body['fieldHeaders'] !== undefined
+      ? parseRankingFieldHeaders(body['fieldHeaders'])
+      : { ok: true as const, value: parseStoredFieldHeaders(gamification.ranking_field_headers_json) };
+    if (!requestedHeaders.ok) return c.json({ error: requestedHeaders.error }, 400);
+    const fieldHeaders = mergeRankingFieldHeaders(
+      parseStoredFieldHeaders(gamification.ranking_field_headers_json),
+      requestedHeaders.value,
+    );
     const parsed = parseRankingInput(
-      { ...(isRecord(body) ? body : {}), externalParticipantId: c.req.param('externalParticipantId') },
+      { ...(isRecord(body) ? body : {}), participantCode: c.req.param('participantCode') },
       gamification.value_precision,
+      fieldHeaders,
     );
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const previousParticipantCode = isRecord(body) && body['previousParticipantCode'] !== undefined
+      ? readOptionalString(body, 'previousParticipantCode', 128)
+      : undefined;
+    if (previousParticipantCode === null) return c.json({ error: 'Previous participant code is invalid.' }, 400);
+    if (previousParticipantCode && previousParticipantCode !== parsed.value.participantCode) {
+      const participant = await findParticipant(c.env.DB, gamification.company_id, previousParticipantCode);
+      if (!participant) return c.json({ error: 'Ranking participant not found.' }, 404);
+      const duplicate = await findParticipant(c.env.DB, gamification.company_id, parsed.value.participantCode);
+      if (duplicate) return c.json({ error: 'Participant code already exists for this company.' }, 409);
+      const existingRelationship = await c.env.DB.prepare(
+        'SELECT id FROM rankings WHERE gamification_id = ? AND participant_id = ? LIMIT 1',
+      ).bind(gamification.id, participant.id).first<{ id: number }>();
+      if (!existingRelationship) return c.json({ error: 'Ranking participant not found.' }, 404);
+      await c.env.DB.batch([
+        c.env.DB.prepare(
+          'UPDATE participants SET participant_code = ?, full_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        ).bind(parsed.value.participantCode, parsed.value.fullName, participant.id),
+        c.env.DB.prepare(
+          'UPDATE rankings SET score_value = ?, custom_fields_json = ?, updated_at = CURRENT_TIMESTAMP WHERE gamification_id = ? AND participant_id = ?',
+        ).bind(parsed.value.scoreValue, JSON.stringify(parsed.value.customFields), gamification.id, participant.id),
+        c.env.DB.prepare('UPDATE gamifications SET ranking_field_headers_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+          .bind(JSON.stringify(fieldHeaders), gamification.id),
+      ]);
+      return c.json({ ok: true });
+    }
     const existingEntry = await c.env.DB.prepare(
-      'SELECT id FROM rankings WHERE gamification_id = ? AND external_participant_id = ? LIMIT 1',
+      `SELECT r.id FROM rankings r INNER JOIN participants p ON p.id = r.participant_id
+       WHERE r.gamification_id = ? AND p.participant_code = ? LIMIT 1`,
     )
-      .bind(gamification.id, parsed.value.externalParticipantId)
+      .bind(gamification.id, parsed.value.participantCode)
       .first<{ id: number }>();
     if (!existingEntry && (await rankingCount(c.env.DB, gamification.id)) >= maxRankingEntries) {
       return c.json({ error: 'Ranking cannot contain more than 1000 entries.' }, 409);
     }
-    await c.env.DB.prepare(
-      `INSERT INTO rankings (gamification_id, external_participant_id, full_name, score_value)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT (gamification_id, external_participant_id) DO UPDATE SET
-         full_name = excluded.full_name, score_value = excluded.score_value, updated_at = CURRENT_TIMESTAMP`,
-    )
-      .bind(gamification.id, parsed.value.externalParticipantId, parsed.value.fullName, parsed.value.scoreValue)
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO participants (company_id, participant_code, full_name)
+         VALUES (?, ?, ?)
+         ON CONFLICT (company_id, participant_code) DO UPDATE SET
+           full_name = excluded.full_name, updated_at = CURRENT_TIMESTAMP`,
+      ).bind(gamification.company_id, parsed.value.participantCode, parsed.value.fullName),
+      c.env.DB.prepare(
+        `INSERT INTO rankings (gamification_id, participant_id, score_value, custom_fields_json)
+         SELECT ?, id, ?, ? FROM participants WHERE company_id = ? AND participant_code = ?
+         ON CONFLICT (gamification_id, participant_id) DO UPDATE SET
+           score_value = excluded.score_value, custom_fields_json = excluded.custom_fields_json, updated_at = CURRENT_TIMESTAMP`,
+      ).bind(gamification.id, parsed.value.scoreValue, JSON.stringify(parsed.value.customFields), gamification.company_id, parsed.value.participantCode),
+      c.env.DB.prepare('UPDATE gamifications SET ranking_field_headers_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+        .bind(JSON.stringify(fieldHeaders), gamification.id),
+    ]);
+    return c.json({ ok: true });
+  });
+
+  app.delete('/superuser/gamifications/:gamificationPublicId/ranking/:participantCode', async (c) => {
+    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
+    if (!auth.ok) return auth.response;
+    const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
+    if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
+    const participant = await findRankedParticipant(c.env.DB, gamification.id, c.req.param('participantCode'));
+    if (!participant) return c.json({ ok: true });
+    await c.env.DB.prepare('DELETE FROM rankings WHERE gamification_id = ? AND participant_id = ?')
+      .bind(gamification.id, participant.id)
       .run();
     return c.json({ ok: true });
   });
 
-  app.delete('/superuser/gamifications/:gamificationPublicId/ranking/:externalParticipantId', async (c) => {
+  app.put('/superuser/gamifications/:gamificationPublicId/ranking/:participantCode/picture', async (c) => {
     const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
     if (!auth.ok) return auth.response;
     const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
-    const participant = await findRanking(c.env.DB, gamification.id, c.req.param('externalParticipantId'));
-    if (!participant) return c.json({ ok: true });
-    const statements = [
-      c.env.DB.prepare('DELETE FROM rankings WHERE gamification_id = ? AND external_participant_id = ?')
-        .bind(gamification.id, participant.external_participant_id),
-    ];
-    if (participant.picture_key) statements.unshift(enqueueMediaStatement(c.env.DB, participant.picture_key));
-    await c.env.DB.batch(statements);
-    return c.json({ ok: true });
-  });
-
-  app.put('/superuser/gamifications/:gamificationPublicId/ranking/:externalParticipantId/picture', async (c) => {
-    const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
-    if (!auth.ok) return auth.response;
-    const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
-    if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
-    const participant = await findRanking(c.env.DB, gamification.id, c.req.param('externalParticipantId'));
+    const participant = await findRankedParticipant(c.env.DB, gamification.id, c.req.param('participantCode'));
     if (!participant) return c.json({ error: 'Ranking participant not found.' }, 404);
     const image = await readWebp(c.req.raw);
     if (!image.ok) return c.json({ error: image.error }, image.status);
-    const participantId = encodeURIComponent(participant.external_participant_id);
-    const key = `companies/${gamification.company_public_id}/gamifications/${gamification.public_id}/participants/${participantId}/${crypto.randomUUID()}.webp`;
+    const participantCode = encodeURIComponent(participant.participant_code);
+    const key = `companies/${gamification.company_public_id}/participants/${participantCode}/${crypto.randomUUID()}.webp`;
     const stored = await replaceMedia(c.env, key, image.bytes, participant.picture_key, () =>
       c.env.DB.prepare(
-        'UPDATE rankings SET picture_key = ?, updated_at = CURRENT_TIMESTAMP WHERE gamification_id = ? AND external_participant_id = ?',
-      ).bind(key, gamification.id, participant.external_participant_id),
+        'UPDATE participants SET picture_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      ).bind(key, participant.id),
     );
     if (!stored.ok) return c.json({ error: stored.error }, 500);
     return c.json({ ok: true, pictureUrl: assetUrl(c.env, key) });
   });
 
-  app.delete('/superuser/gamifications/:gamificationPublicId/ranking/:externalParticipantId/picture', async (c) => {
+  app.delete('/superuser/gamifications/:gamificationPublicId/ranking/:participantCode/picture', async (c) => {
     const auth = await requireSuperuser(c, readAuthenticatedPrincipal);
     if (!auth.ok) return auth.response;
     const gamification = await requireWritableGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
-    const participant = await findRanking(c.env.DB, gamification.id, c.req.param('externalParticipantId'));
+    const participant = await findRankedParticipant(c.env.DB, gamification.id, c.req.param('participantCode'));
     if (!participant) return c.json({ error: 'Ranking participant not found.' }, 404);
     if (participant.picture_key) {
       await c.env.DB.batch([
         c.env.DB.prepare(
-          'UPDATE rankings SET picture_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE gamification_id = ? AND external_participant_id = ?',
-        ).bind(gamification.id, participant.external_participant_id),
+          'UPDATE participants SET picture_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        ).bind(participant.id),
         enqueueMediaStatement(c.env.DB, participant.picture_key),
       ]);
     }
@@ -648,7 +708,7 @@ export const runGamificationMaintenance = async (env: Env, now = new Date()): Pr
 };
 
 const gamificationSelect = `SELECT g.id, g.public_id, g.company_id, c.public_id AS company_public_id,
-  g.title, g.description, g.image_key, g.start_at, g.end_at, g.goal_value, g.value_precision, g.goal_unit, g.max_live_ranking,
+  g.title, g.description, g.image_key, g.start_at, g.end_at, g.goal_value, g.value_precision, g.goal_unit, g.max_live_ranking, g.ranking_field_headers_json,
   g.status, g.outcome, g.created_at, g.updated_at, g.closed_at, g.actual_end_at
   FROM gamifications g JOIN companies c ON c.id = g.company_id`;
 
@@ -704,14 +764,25 @@ const outcomeForGoal = async (
   return total >= goalValue ? 'achieved' : 'missed';
 };
 
-const findRanking = (db: D1Database, gamificationId: number, externalParticipantId: string): Promise<RankingRow | null> =>
+const findParticipant = (db: D1Database, companyId: number, participantCode: string): Promise<ParticipantRow | null> =>
   db
     .prepare(
-      `SELECT external_participant_id, full_name, picture_key, score_value, created_at, updated_at, 0 AS position
-       FROM rankings WHERE gamification_id = ? AND external_participant_id = ? LIMIT 1`,
+      `SELECT id, company_id, participant_code, full_name, picture_key, created_at, updated_at
+       FROM participants WHERE company_id = ? AND participant_code = ? LIMIT 1`,
     )
-    .bind(gamificationId, externalParticipantId)
-    .first<RankingRow>();
+    .bind(companyId, participantCode)
+    .first<ParticipantRow>();
+
+const findRankedParticipant = (db: D1Database, gamificationId: number, participantCode: string): Promise<ParticipantRow | null> =>
+  db
+    .prepare(
+      `SELECT p.id, p.company_id, p.participant_code, p.full_name, p.picture_key, p.created_at, p.updated_at
+       FROM rankings r
+       INNER JOIN participants p ON p.id = r.participant_id
+       WHERE r.gamification_id = ? AND p.participant_code = ? LIMIT 1`,
+    )
+    .bind(gamificationId, participantCode)
+    .first<ParticipantRow>();
 
 const requireSuperuser = async (
   c: AppContext,
@@ -830,15 +901,81 @@ const parsePrizeInput = (
 const parseRankingInput = (
   body: unknown,
   precision: number,
+  fieldHeaders: string[],
 ): { ok: true; value: RankingInput } | { ok: false; error: string } => {
   if (!isRecord(body)) return { ok: false, error: 'Invalid ranking entry.' };
-  const externalParticipantId = readString(body, 'externalParticipantId', 128);
+  const participantCode = readString(body, 'participantCode', 128);
   const fullName = readString(body, 'fullName', 160);
   const scoreValue = parseDecimal(body['score'], precision);
-  if (externalParticipantId === null || fullName === null || scoreValue === null) {
-    return { ok: false, error: 'Each ranking entry requires externalParticipantId, fullName and a valid score.' };
+  const customFields = parseRankingFieldValues(body['customFields'], fieldHeaders);
+  if (participantCode === null || fullName === null || scoreValue === null) {
+    return { ok: false, error: 'Each ranking entry requires participantCode, fullName and a valid score.' };
   }
-  return { ok: true, value: { externalParticipantId, fullName, scoreValue } };
+  if (!customFields.ok) return customFields;
+  return { ok: true, value: { participantCode, fullName, scoreValue, customFields: customFields.value } };
+};
+
+const reservedRankingFieldHeaders = new Set(['participantcode', 'fullname', 'score', 'image']);
+
+const parseRankingFieldHeaders = (raw: unknown): { ok: true; value: string[] } | { ok: false; error: string } => {
+  if (raw === undefined) return { ok: true, value: [] };
+  if (!Array.isArray(raw) || raw.length > maxRankingFieldHeaders) {
+    return { ok: false, error: `Ranking field headers must be an array with at most ${maxRankingFieldHeaders} items.` };
+  }
+  const headers: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== 'string') return { ok: false, error: 'Each ranking field header must be text.' };
+    const header = item.trim();
+    const key = header.toLocaleLowerCase('en-US');
+    if (!header || header.length > maxRankingFieldHeaderLength || reservedRankingFieldHeaders.has(key) || seen.has(key)) {
+      return { ok: false, error: 'Ranking field headers are invalid, reserved or duplicated.' };
+    }
+    seen.add(key);
+    headers.push(header);
+  }
+  return { ok: true, value: headers };
+};
+
+const parseRankingFieldValues = (
+  raw: unknown,
+  fieldHeaders: string[],
+): { ok: true; value: Record<string, string> } | { ok: false; error: string } => {
+  if (raw === undefined) return { ok: true, value: {} };
+  if (!isRecord(raw)) return { ok: false, error: 'Ranking custom fields must be an object.' };
+  const allowed = new Map(fieldHeaders.map((header) => [header.toLocaleLowerCase('en-US'), header]));
+  const values: Record<string, string> = {};
+  for (const [rawHeader, rawValue] of Object.entries(raw)) {
+    const header = allowed.get(rawHeader.trim().toLocaleLowerCase('en-US'));
+    if (!header || typeof rawValue !== 'string' || rawValue.trim().length > maxRankingFieldValueLength) {
+      return { ok: false, error: 'Ranking custom field values are invalid.' };
+    }
+    const value = rawValue.trim();
+    if (value) values[header] = value;
+  }
+  return { ok: true, value: values };
+};
+
+const parseStoredFieldHeaders = (raw: string): string[] => {
+  try {
+    const parsed = parseRankingFieldHeaders(JSON.parse(raw));
+    return parsed.ok ? parsed.value : [];
+  } catch {
+    return [];
+  }
+};
+
+const mergeRankingFieldHeaders = (existing: string[], requested: string[]): string[] => {
+  const headers = [...existing];
+  const seen = new Set(headers.map((header) => header.toLocaleLowerCase('en-US')));
+  for (const header of requested) {
+    const key = header.toLocaleLowerCase('en-US');
+    if (!seen.has(key)) {
+      seen.add(key);
+      headers.push(header);
+    }
+  }
+  return headers;
 };
 
 const readJson = async (request: Request): Promise<unknown> => {
@@ -935,6 +1072,7 @@ const serializeGamification = (row: GamificationRow, env: Env, requestUrl?: stri
   valuePrecision: row.value_precision,
   goalUnit: row.goal_unit,
   maxLiveRanking: row.max_live_ranking,
+  rankingFieldHeaders: parseStoredFieldHeaders(row.ranking_field_headers_json),
   status: row.status === 'closed' ? 'inactive' : row.status,
   outcome: row.outcome,
   createdAt: row.created_at,
@@ -961,14 +1099,25 @@ const serializePrize = (row: PrizeRow, env: Env, requestUrl?: string) => ({
 });
 
 const serializeRanking = (row: RankingRow, precision: number, env: Env, requestUrl?: string) => ({
-  externalParticipantId: row.external_participant_id,
+  participantCode: row.participant_code,
   fullName: row.full_name,
   pictureUrl: row.picture_key ? assetUrl(env, row.picture_key, requestUrl) : null,
   position: row.position,
   score: formatDecimal(row.score_value, precision),
+  customFields: parseStoredFieldValues(row.custom_fields_json),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
+
+const parseStoredFieldValues = (raw: string): Record<string, string> => {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!isRecord(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter(([, value]) => typeof value === 'string')) as Record<string, string>;
+  } catch {
+    return {};
+  }
+};
 
 const ruleInsertStatements = (
   db: D1Database,
