@@ -36,7 +36,7 @@ const seedAuthDb = async (): Promise<void> => {
       display_name TEXT NOT NULL,
       email TEXT,
       access_code_hash TEXT NOT NULL,
-      company_id INTEGER REFERENCES companies (id),
+      company_id INTEGER REFERENCES companies (id) ON DELETE CASCADE,
       is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       CHECK (
@@ -225,10 +225,12 @@ describe('auth endpoints', () => {
         {
           public_id: '4c6f2c3d-3f73-4472-a453-4e0d6cb472d8',
           name: 'Ludus Sales Beta',
+          email: null,
         },
         {
           public_id: '82b4c7b9-68d1-4cc6-9e36-41d4db4e05f0',
           name: 'Ludus Sales Demo',
+          email: 'demo@ludusales.local',
         },
       ],
     });
@@ -325,10 +327,12 @@ describe('auth endpoints', () => {
         {
           public_id: '4c6f2c3d-3f73-4472-a453-4e0d6cb472d8',
           name: 'Ludus Sales Beta',
+          email: null,
         },
         {
           public_id: '82b4c7b9-68d1-4cc6-9e36-41d4db4e05f0',
           name: 'Ludus Sales Demo',
+          email: 'demo@ludusales.local',
         },
       ],
     });
@@ -427,11 +431,12 @@ describe('auth endpoints', () => {
     );
 
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { ok: true; company: { public_id: string; name: string } };
+    const body = (await response.json()) as { ok: true; company: { public_id: string; name: string; email: string | null } };
 
     expect(body.ok).toBe(true);
     expect(body.company.name).toBe('Ludus Sales Nueva');
     expect(body.company.public_id).toEqual(expect.any(String));
+    expect(body.company.email).toBe('nueva@ludusales.local');
 
     const createdLoginResponse = await app.request(
       '/auth/login',
@@ -452,6 +457,59 @@ describe('auth endpoints', () => {
         name: 'Ludus Sales Nueva',
       },
     });
+  });
+
+  it('updates and deletes companies for superusers, cascading to their company user', async () => {
+    const loginResponse = await app.request(
+      '/auth/login',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accessCode: 'OWNER-LOCAL-2026' }),
+      },
+      authEnv(),
+    );
+    const sessionCookie = loginResponse.headers.get('Set-Cookie')?.split(';')[0];
+
+    if (!sessionCookie) throw new Error('Expected session cookie');
+
+    const companyPublicId = '82b4c7b9-68d1-4cc6-9e36-41d4db4e05f0';
+    const updateResponse = await app.request(
+      `/superuser/companies/${companyPublicId}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: sessionCookie },
+        body: JSON.stringify({ name: 'Ludus Sales Renombrada', email: 'renombrada@ludusales.local' }),
+      },
+      authEnv(),
+    );
+
+    expect(updateResponse.status).toBe(200);
+    await expect(updateResponse.json()).resolves.toEqual({
+      ok: true,
+      company: { public_id: companyPublicId, name: 'Ludus Sales Renombrada', email: 'renombrada@ludusales.local' },
+    });
+    await expect(
+      db()
+        .prepare('SELECT email FROM users WHERE public_id = ?')
+        .bind('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+        .first<{ email: string | null }>(),
+    ).resolves.toEqual({ email: 'renombrada@ludusales.local' });
+
+    const deleteResponse = await app.request(
+      `/superuser/companies/${companyPublicId}`,
+      { method: 'DELETE', headers: { Cookie: sessionCookie } },
+      authEnv(),
+    );
+
+    expect(deleteResponse.status).toBe(200);
+    await expect(deleteResponse.json()).resolves.toEqual({ ok: true });
+    await expect(
+      db()
+        .prepare('SELECT COUNT(*) AS count FROM users WHERE public_id = ?')
+        .bind('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+        .first<{ count: number }>(),
+    ).resolves.toEqual({ count: 0 });
   });
 
   it('clears the session cookie on logout', async () => {

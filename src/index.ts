@@ -30,8 +30,8 @@ type Company = {
   name: string;
 };
 
-type DashboardCompany = Pick<Company, 'public_id' | 'name'>;
-type AuthenticatedCompany = DashboardCompany;
+type DashboardCompany = Pick<Company, 'public_id' | 'name'> & { email?: string | null };
+type AuthenticatedCompany = Pick<Company, 'public_id' | 'name'>;
 type UserRole = 'company' | 'superuser';
 
 type LoginPayload = {
@@ -43,6 +43,11 @@ type CreateCompanyAccountPayload = {
   accountName: string;
   email: string | null;
   accessCode: string;
+};
+
+type UpdateCompanyPayload = {
+  name: string;
+  email: string | null;
 };
 
 type JwtPayload = {
@@ -214,6 +219,61 @@ app.post('/superuser/companies', async (c) => {
   }
 });
 
+app.patch('/superuser/companies/:companyPublicId', async (c) => {
+  const payload = await readUpdateCompanyPayload(c.req.raw);
+
+  if (!payload.ok) {
+    return c.json({ error: payload.error }, 400);
+  }
+
+  const auth = await readAuthenticatedPrincipal(c);
+
+  if (!auth.ok) return auth.response;
+  if (auth.principal.role !== 'superuser') return c.json({ error: 'Forbidden.' }, 403);
+
+  const db = createDb(c.env);
+
+  if (!db) return c.json({ error: 'Authentication service is not configured.' }, 500);
+
+  const company = await db
+    .select({ id: companies.id, public_id: companies.publicId })
+    .from(companies)
+    .where(eq(companies.publicId, c.req.param('companyPublicId')))
+    .limit(1)
+    .get();
+
+  if (!company) return c.json({ error: 'Company not found.' }, 404);
+
+  await db.batch([
+    db.update(companies).set({ name: payload.value.name }).where(eq(companies.id, company.id)),
+    db
+      .update(users)
+      .set({ email: payload.value.email })
+      .where(and(eq(users.companyId, company.id), eq(users.role, 'company'))),
+  ]);
+
+  return c.json({ ok: true, company: { public_id: company.public_id, ...payload.value } });
+});
+
+app.delete('/superuser/companies/:companyPublicId', async (c) => {
+  const auth = await readAuthenticatedPrincipal(c);
+
+  if (!auth.ok) return auth.response;
+  if (auth.principal.role !== 'superuser') return c.json({ error: 'Forbidden.' }, 403);
+
+  const db = createDb(c.env);
+
+  if (!db) return c.json({ error: 'Authentication service is not configured.' }, 500);
+
+  const company = await db
+    .delete(companies)
+    .where(eq(companies.publicId, c.req.param('companyPublicId')))
+    .returning({ public_id: companies.publicId })
+    .get();
+
+  return company ? c.json({ ok: true }) : c.json({ error: 'Company not found.' }, 404);
+});
+
 app.post('/contact', async (c) => {
   const payload = await readContactPayload(c.req.raw);
 
@@ -280,6 +340,30 @@ const readCreateCompanyAccountPayload = async (
   }
 
   return { ok: true, value: parsed };
+};
+
+const readUpdateCompanyPayload = async (
+  request: Request,
+): Promise<{ ok: true; value: UpdateCompanyPayload } | { ok: false; error: string }> => {
+  let body: unknown;
+
+  try {
+    body = await request.json();
+  } catch {
+    return { ok: false, error: 'Invalid JSON body.' };
+  }
+
+  if (!isRecord(body)) return { ok: false, error: 'Invalid company payload.' };
+
+  const name = readRequiredString(body, 'name', 160);
+  const emailValue = body['email'];
+  const email = typeof emailValue === 'string' ? emailValue.trim() : null;
+
+  if (!name || (email && (email.length > 254 || !isEmail(email)))) {
+    return { ok: false, error: 'Invalid company payload.' };
+  }
+
+  return { ok: true, value: { name, email: email || null } };
 };
 
 const readContactPayload = async (
@@ -476,8 +560,10 @@ const readDashboardCompaniesFromDb = async (
     .select({
       public_id: companies.publicId,
       name: companies.name,
+      email: users.email,
     })
     .from(companies)
+    .leftJoin(users, and(eq(users.companyId, companies.id), eq(users.role, 'company')))
     .orderBy(asc(companies.name))
     .all();
 
@@ -524,6 +610,7 @@ const createCompanyAccountInDb = async (
   return {
     public_id: company.public_id,
     name: company.name,
+    email: payload.email,
   };
 };
 

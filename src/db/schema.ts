@@ -21,7 +21,7 @@ export const users = sqliteTable(
     displayName: text('display_name').notNull(),
     email: text('email'),
     accessCodeHash: text('access_code_hash').notNull(),
-    companyId: integer('company_id').references(() => companies.id),
+    companyId: integer('company_id').references(() => companies.id, { onDelete: 'cascade' }),
     isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
     createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
   },
