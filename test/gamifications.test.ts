@@ -43,7 +43,7 @@ describe('gamification schema', () => {
       testEnv.DB.prepare(
         `INSERT INTO gamifications
          (public_id, company_id, description, start_at, end_at, goal_value, value_precision, goal_unit)
-         VALUES ('invalid', ?, 'Invalid', '2027-01-02T00:00:00.000Z', '2027-01-01T00:00:00.000Z', 1, 7, 'sales')`,
+         VALUES ('invalid', ?, 'Invalid', '2027-01-02', '2027-01-01', 1, 7, 'sales')`,
       )
         .bind(company!.id)
         .run(),
@@ -52,7 +52,7 @@ describe('gamification schema', () => {
     await testEnv.DB.prepare(
       `INSERT INTO gamifications
        (public_id, company_id, description, start_at, end_at, goal_value, value_precision, goal_unit)
-       VALUES ('cascade-test', ?, 'Cascade', '2027-01-01T00:00:00.000Z', '2027-01-02T00:00:00.000Z', 100, 2, 'sales')`,
+       VALUES ('cascade-test', ?, 'Cascade', '2027-01-01', '2027-01-02', 100, 2, 'sales')`,
     )
       .bind(company!.id)
       .run();
@@ -132,13 +132,15 @@ describe('gamification API', () => {
     const cookie = await login('OWNER-LOCAL-2026');
     const gamification = await createGamification(cookie, demoCompanyId, 'Live limit');
     const detail = await request(`/companies/${demoCompanyId}/gamifications/${gamification.publicId}`, cookie);
-    expect(((await detail.json()) as { gamification: { maxLiveRanking: number } }).gamification.maxLiveRanking).toBe(5);
+    expect(((await detail.json()) as { gamification: { maxLiveRanking: number; rankingUnit: string } }).gamification)
+      .toMatchObject({ maxLiveRanking: 5, rankingUnit: 'Ludu Points' });
 
     const updated = await request(`/superuser/gamifications/${gamification.publicId}`, cookie, {
-      method: 'PATCH', json: { maxLiveRanking: 7 },
+      method: 'PATCH', json: { maxLiveRanking: 7, rankingUnit: 'Créditos' },
     });
     expect(updated.status).toBe(200);
-    expect(((await updated.json()) as { gamification: { maxLiveRanking: number } }).gamification.maxLiveRanking).toBe(7);
+    expect(((await updated.json()) as { gamification: { maxLiveRanking: number; rankingUnit: string } }).gamification)
+      .toMatchObject({ maxLiveRanking: 7, rankingUnit: 'Créditos' });
 
     const invalid = await request(`/superuser/gamifications/${gamification.publicId}`, cookie, {
       method: 'PATCH', json: { maxLiveRanking: 2 },
@@ -213,7 +215,7 @@ describe('gamification API', () => {
     const cookie = await login('OWNER-LOCAL-2026');
     const gamification = await createGamification(cookie, demoCompanyId, 'Blocks');
     const first = await request(`/superuser/gamifications/${gamification.publicId}/block-one-cards`, cookie, {
-      method: 'POST', json: { title: 'Objetivo mensual', iconName: 'target', value: '75', subvalue: 'Ventas', hasProgress: true, currentValue: '50', maxValue: '75' },
+      method: 'POST', json: { title: 'Objetivo mensual', iconName: 'target', value: '75', subvalue: 'Ventas', hasProgress: true, currentValue: '50.5', maxValue: '75.25' },
     });
     expect(first.status).toBe(201);
     const firstCard = ((await first.json()) as { card: { publicId: string } }).card;
@@ -236,7 +238,7 @@ describe('gamification API', () => {
     const detail = await request(`/companies/${demoCompanyId}/gamifications/${gamification.publicId}`, cookie);
     const body = (await detail.json()) as { gamification: { blockOneCards: Array<{ title: string; progressCurrent: string | null }>; blockTwoCards: Array<{ imagePublicId: string }> } };
     expect(body.gamification.blockOneCards.map((card) => card.title)).toEqual(['Puntos', 'Objetivo mensual']);
-    expect(body.gamification.blockOneCards[1].progressCurrent).toBe('50');
+    expect(body.gamification.blockOneCards[1].progressCurrent).toBe('50.5');
     expect(body.gamification.blockTwoCards).toEqual([expect.objectContaining({ imagePublicId: image.publicId })]);
     expect((await request('/superuser/block-images', cookie)).status).toBe(200);
   });
@@ -353,7 +355,7 @@ describe('gamification API', () => {
     await testEnv.DB.prepare(
       `INSERT INTO gamifications
        (public_id, company_id, description, start_at, end_at, goal_value, value_precision, goal_unit, status)
-       VALUES ('reactivation-expired', ?, 'Expired', '2025-01-01T00:00:00.000Z', '2025-01-02T00:00:00.000Z', 1000, 2, 'sales', 'active')`,
+       VALUES ('reactivation-expired', ?, 'Expired', '2025-01-01', '2025-01-02', 1000, 2, 'sales', 'active')`,
     ).bind(company!.id).run();
 
     const missingEndDate = await request('/superuser/gamifications/reactivation-expired/activate', cookie, { method: 'POST' });
@@ -361,10 +363,10 @@ describe('gamification API', () => {
 
     const reactivated = await request('/superuser/gamifications/reactivation-expired/activate', cookie, {
       method: 'POST',
-      json: { endAt: '2027-02-01T00:00:00.000Z' },
+      json: { endAt: '2027-02-01' },
     });
     expect(((await reactivated.json()) as { gamification: { status: string; endAt: string; actualEndAt: string | null } }).gamification)
-      .toMatchObject({ status: 'active', endAt: '2027-02-01T00:00:00.000Z', actualEndAt: null });
+      .toMatchObject({ status: 'active', endAt: '2027-02-01', actualEndAt: null });
   });
 
   it('closes expired active gamifications from scheduled maintenance', async () => {
@@ -372,7 +374,7 @@ describe('gamification API', () => {
     await testEnv.DB.prepare(
       `INSERT INTO gamifications
        (public_id, company_id, description, start_at, end_at, goal_value, value_precision, goal_unit, status)
-       VALUES ('expired', ?, 'Expired', '2025-01-01T00:00:00.000Z', '2025-01-02T00:00:00.000Z', 1000, 2, 'sales', 'active')`,
+       VALUES ('expired', ?, 'Expired', '2025-01-01', '2025-01-02', 1000, 2, 'sales', 'active')`,
     )
       .bind(company!.id)
       .run();
@@ -499,11 +501,12 @@ const createGamification = async (cookie: string, companyId: string, description
 const gamificationPayload = (description: string) => ({
   title: 'Reto de prueba',
   description,
-  startAt: '2027-01-01T09:00:00+01:00',
-  endAt: '2027-02-01T18:00:00+01:00',
+  startAt: '2027-01-01',
+  endAt: '2027-02-01',
   goal: '125.50',
   valuePrecision: 2,
   goalUnit: 'sales',
+  rankingUnit: 'Ludu Points',
 });
 
 const webp = (width: number, height: number): ArrayBuffer => {
