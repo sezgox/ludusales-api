@@ -27,6 +27,7 @@ type GamificationRow = {
   goal_value: number | null;
   value_precision: number;
   goal_unit: string | null;
+  ranking_unit: string;
   max_live_ranking: number;
   ranking_field_headers_json: string;
   status: 'draft' | 'active' | 'closed';
@@ -135,6 +136,7 @@ type GamificationInput = {
   goalValue: number | null;
   valuePrecision: number;
   goalUnit: string | null;
+  rankingUnit: string;
   maxLiveRanking: number;
   rules?: GamificationRuleInput[];
 };
@@ -163,6 +165,7 @@ const maxDescriptionLength = 20_000;
 const maxRuleDescriptionLength = 2_000;
 const maxCardValueLength = 160;
 const maxCardDescriptionLength = 2_000;
+const defaultRankingUnit = 'Ludu Points';
 const allowedDescriptionTags = ['p', 'h2', 'h3', 'strong', 'em', 'u', 's', 'ul', 'ol', 'li', 'blockquote', 'br', 'a'];
 const immutableImageCacheControl = 'public, max-age=31536000, immutable';
 
@@ -293,8 +296,8 @@ export const registerGamificationRoutes = (
     const publicId = crypto.randomUUID();
     await c.env.DB.prepare(
       `INSERT INTO gamifications
-       (public_id, company_id, title, description, start_at, end_at, goal_value, value_precision, goal_unit, max_live_ranking)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (public_id, company_id, title, description, start_at, end_at, goal_value, value_precision, goal_unit, ranking_unit, max_live_ranking)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         publicId,
@@ -306,6 +309,7 @@ export const registerGamificationRoutes = (
         parsed.value.goalValue,
         parsed.value.valuePrecision,
         parsed.value.goalUnit,
+        parsed.value.rankingUnit,
         parsed.value.maxLiveRanking,
       )
       .run();
@@ -344,7 +348,7 @@ export const registerGamificationRoutes = (
     const statements = [
       c.env.DB.prepare(
         `UPDATE gamifications
-         SET title = ?, description = ?, start_at = ?, end_at = ?, goal_value = ?, value_precision = ?, goal_unit = ?, max_live_ranking = ?,
+         SET title = ?, description = ?, start_at = ?, end_at = ?, goal_value = ?, value_precision = ?, goal_unit = ?, ranking_unit = ?, max_live_ranking = ?,
              outcome = ?, updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
       )
@@ -356,6 +360,7 @@ export const registerGamificationRoutes = (
           parsed.value.goalValue,
           parsed.value.valuePrecision,
           parsed.value.goalUnit,
+          parsed.value.rankingUnit,
           parsed.value.maxLiveRanking,
           outcome,
           gamification.id,
@@ -380,7 +385,8 @@ export const registerGamificationRoutes = (
     let gamification = await findGamification(c.env.DB, c.req.param('gamificationPublicId'));
     if (!gamification) return c.json({ error: 'Gamification not found.' }, 404);
     const now = new Date().toISOString();
-    if (gamification.status === 'active' && gamification.end_at <= now) {
+    const currentDate = now.slice(0, 10);
+    if (gamification.status === 'active' && gamification.end_at < currentDate) {
       await deactivateGamification(c.env.DB, gamification.id, now);
       gamification = await findGamification(c.env.DB, gamification.public_id);
     }
@@ -388,9 +394,9 @@ export const registerGamificationRoutes = (
 
     const body = await readJson(c.req.raw);
     const requestedEndAt = isRecord(body) && body['endAt'] !== undefined
-      ? readIsoDate(body['endAt'])
+      ? readDate(body['endAt'])
       : gamification!.end_at;
-    if (!requestedEndAt || requestedEndAt <= gamification!.start_at || requestedEndAt <= now) {
+    if (!requestedEndAt || requestedEndAt <= gamification!.start_at || requestedEndAt < currentDate) {
       return c.json({ error: 'A new end date after the current time is required to activate this gamification.' }, 409);
     }
 
@@ -895,7 +901,7 @@ export const runGamificationMaintenance = async (env: Env, now = new Date()): Pr
 };
 
 const gamificationSelect = `SELECT g.id, g.public_id, g.company_id, c.public_id AS company_public_id,
-  g.title, g.description, g.image_key, g.start_at, g.end_at, g.goal_value, g.value_precision, g.goal_unit, g.max_live_ranking, g.ranking_field_headers_json,
+  g.title, g.description, g.image_key, g.start_at, g.end_at, g.goal_value, g.value_precision, g.goal_unit, g.ranking_unit, g.max_live_ranking, g.ranking_field_headers_json,
   g.status, g.outcome, g.created_at, g.updated_at, g.closed_at, g.actual_end_at
   FROM gamifications g JOIN companies c ON c.id = g.company_id`;
 
@@ -1028,6 +1034,7 @@ const parseGamificationInput = (
   const rawDescription = readString(body, 'description', maxDescriptionLength, existing?.description);
   const description = rawDescription === null ? null : sanitizeDescription(rawDescription);
   const goalUnit = readOptionalString(body, 'goalUnit', 40, existing?.goal_unit);
+  const rankingUnit = readString(body, 'rankingUnit', 40, existing?.ranking_unit ?? defaultRankingUnit);
   const valuePrecision = readInteger(body, 'valuePrecision', 0, 6, existing?.value_precision);
   const maxLiveRanking = readInteger(
     body,
@@ -1036,12 +1043,12 @@ const parseGamificationInput = (
     maxRankingEntries,
     existing?.max_live_ranking ?? 5,
   );
-  const startAt = readIsoDate(body['startAt'], existing?.start_at);
-  const endAt = readIsoDate(body['endAt'], existing?.end_at);
+  const startAt = readDate(body['startAt'], existing?.start_at);
+  const endAt = readDate(body['endAt'], existing?.end_at);
   const rules = parseGamificationRules(body['rules']);
 
   if (
-    !title || !description || goalUnit === undefined || typeof valuePrecision !== 'number' || typeof maxLiveRanking !== 'number' || !startAt || !endAt
+    !title || !description || goalUnit === undefined || !rankingUnit || typeof valuePrecision !== 'number' || typeof maxLiveRanking !== 'number' || !startAt || !endAt
   ) {
     return { ok: false, error: 'Title, description, dates, value precision and live ranking are required.' };
   }
@@ -1054,7 +1061,7 @@ const parseGamificationInput = (
   const goalValue = parseOptionalDecimal(body['goal'] === undefined ? defaultGoal : body['goal'], valuePrecision);
   if (goalValue === undefined) return { ok: false, error: 'Goal must be a non-negative decimal matching value precision.' };
 
-  return { ok: true, value: { title, description, startAt, endAt, goalValue, valuePrecision, goalUnit, maxLiveRanking, rules: rules.value } };
+  return { ok: true, value: { title, description, startAt, endAt, goalValue, valuePrecision, goalUnit, rankingUnit, maxLiveRanking, rules: rules.value } };
 };
 
 const parseGamificationRules = (
@@ -1292,11 +1299,11 @@ const readInteger = (
   return typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= minimum && raw <= maximum ? raw : null;
 };
 
-const readIsoDate = (raw: unknown, fallback?: string): string | null => {
+const readDate = (raw: unknown, fallback?: string): string | null => {
   const value = raw === undefined ? fallback : raw;
-  if (typeof value !== 'string' || !/(?:Z|[+-]\d{2}:\d{2})$/i.test(value)) return null;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value ? value : null;
 };
 
 const parseDecimal = (raw: unknown, precision: number): number | null => {
@@ -1339,6 +1346,7 @@ const serializeGamification = (row: GamificationRow, env: Env, requestUrl?: stri
   goal: row.goal_value === null ? null : formatDecimal(row.goal_value, row.value_precision),
   valuePrecision: row.value_precision,
   goalUnit: row.goal_unit,
+  rankingUnit: row.ranking_unit,
   maxLiveRanking: row.max_live_ranking,
   rankingFieldHeaders: parseStoredFieldHeaders(row.ranking_field_headers_json),
   status: row.status === 'closed' ? 'inactive' : row.status,
@@ -1446,9 +1454,9 @@ const deactivateExpiredGamifications = (db: D1Database, actualEndAt: string): Pr
              ELSE 'missed'
            END,
            closed_at = ?, actual_end_at = ?, updated_at = CURRENT_TIMESTAMP
-       WHERE status = 'active' AND end_at <= ?`,
+       WHERE status = 'active' AND end_at < ?`,
     )
-    .bind(actualEndAt, actualEndAt, actualEndAt)
+    .bind(actualEndAt, actualEndAt, actualEndAt.slice(0, 10))
     .run();
 
 const deactivateGamification = (db: D1Database, id: number, actualEndAt: string): Promise<D1Result> =>

@@ -48,6 +48,7 @@ export const gamifications = sqliteTable(
     goalValue: integer('goal_value'),
     valuePrecision: integer('value_precision').notNull(),
     goalUnit: text('goal_unit'),
+    rankingUnit: text('ranking_unit').notNull().default('Ludu Points'),
     maxLiveRanking: integer('max_live_ranking').notNull().default(5),
     rankingFieldHeadersJson: text('ranking_field_headers_json').notNull().default('[]'),
     status: text('status', { enum: ['draft', 'active', 'closed'] }).notNull().default('draft'),
