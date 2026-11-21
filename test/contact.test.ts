@@ -158,6 +158,28 @@ describe('contact endpoint', () => {
       ]),
     );
   });
+
+  it('includes the expanded contact details in the owner notification', async () => {
+    const resendFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(JSON.stringify({ id: 'email-id' }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', resendFetch);
+    const response = await app.request('/contact', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        firstName: 'Ana Pérez', lastName: '', email: 'ana@example.com', company: 'Empresa',
+        teamSize: '8 a 25', role: 'Directora', phone: '600123456', goals: ['Captar nuevos clientes'],
+        founderInterest: 'Solo quiero información', source: 'LinkedIn', message: '<texto de prueba>',
+      }),
+    }, baseEnv);
+    expect(response.status).toBe(200);
+    const body = JSON.parse(String(resendFetch.mock.calls[0][1]?.body)) as { text: string; html: string };
+    expect(body.text).toContain('Cargo: Directora');
+    expect(body.text).toContain('Objetivos: Captar nuevos clientes');
+    expect(body.text).toContain('Mensaje: <texto de prueba>');
+    expect(body.html).toContain('&lt;texto de prueba&gt;');
+  });
 });
 
 describe('auth endpoints', () => {

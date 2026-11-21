@@ -13,6 +13,12 @@ type ContactPayload = {
   email: string;
   company: string;
   teamSize: string;
+  role: string;
+  phone: string;
+  goals: string[];
+  founderInterest: string;
+  source: string;
+  message: string;
 };
 
 type ResendEmailBody = {
@@ -419,16 +425,28 @@ const parseContactPayload = (body: unknown): ContactPayload | null => {
   }
 
   const firstName = readRequiredString(body, 'firstName', 80);
-  const lastName = readRequiredString(body, 'lastName', 120);
+  const optional = (key: string, limit: number): string | null => {
+    const value = body[key];
+    if (value === undefined || value === null || value === '') return '';
+    return typeof value === 'string' && value.trim().length <= limit ? value.trim() : null;
+  };
+  const lastName = optional('lastName', 120);
   const email = readRequiredString(body, 'email', 254);
   const company = readRequiredString(body, 'company', 160);
   const teamSize = readRequiredString(body, 'teamSize', 80);
+  const role = optional('role', 160);
+  const phone = optional('phone', 40);
+  const founderInterest = optional('founderInterest', 160);
+  const source = optional('source', 160);
+  const message = optional('message', 2000);
+  const rawGoals = body['goals'];
+  const goals = rawGoals === undefined ? [] : Array.isArray(rawGoals) && rawGoals.length <= 5 && rawGoals.every((goal) => typeof goal === 'string' && goal.trim().length > 0 && goal.trim().length <= 160) ? rawGoals.map((goal: string) => goal.trim()) : null;
 
-  if (!firstName || !lastName || !email || !company || !teamSize || !isEmail(email)) {
+  if (!firstName || lastName === null || !email || !company || !teamSize || !isEmail(email) || role === null || phone === null || founderInterest === null || source === null || message === null || goals === null) {
     return null;
   }
 
-  return { firstName, lastName, email, company, teamSize };
+  return { firstName, lastName, email, company, teamSize, role, phone, goals, founderInterest, source, message };
 };
 
 const createDb = (env: Env): DrizzleD1Database<typeof schema> | null => {
@@ -798,27 +816,27 @@ const buildContactNotificationEmail = (payload: ContactPayload, env: Env): Resen
   const toEmail = env.CONTACT_TO_EMAIL ?? defaultContactEmail;
   const fromEmail = env.RESEND_FROM_EMAIL ?? `Ludus Sales <${defaultContactEmail}>`;
   const subject = `Nueva solicitud de llamada - ${payload.company}`;
+  const fullName = [payload.firstName, payload.lastName].filter(Boolean).join(' ');
+  const details: [string, string][] = [
+    ['Nombre', fullName],
+    ['Email', payload.email],
+    ['Empresa', payload.company],
+    ['Tamano del equipo de ventas', payload.teamSize],
+    ...([['Cargo', payload.role], ['Telefono', payload.phone], ['Objetivos', payload.goals.join(', ')], ['Programa Fundadores', payload.founderInterest], ['Origen', payload.source], ['Mensaje', payload.message]] as [string, string][]).filter(([, value]) => value),
+  ];
   const text = [
     'Nueva solicitud de llamada desde ludusales.com',
     '',
-    `Nombre: ${payload.firstName} ${payload.lastName}`,
-    `Email: ${payload.email}`,
-    `Empresa: ${payload.company}`,
-    `Tamano del equipo de ventas: ${payload.teamSize}`,
+    ...details.map(([label, value]) => `${label}: ${value}`),
   ].join('\n');
   const html = `
 ${buildEmailShell({
-  preview: `Nueva solicitud de ${payload.firstName} ${payload.lastName} desde ludusales.com`,
+  preview: `Nueva solicitud de ${fullName} desde ludusales.com`,
   eyebrow: 'Nueva solicitud',
-  title: `${payload.firstName} ${payload.lastName} quiere hablar con Ludus Sales`,
+  title: `${fullName} quiere hablar con Ludus Sales`,
   lead: 'Han completado el formulario de contacto. Responde directamente a este correo para continuar la conversacion.',
   content: `
-    ${buildEmailDetailTable([
-      ['Nombre', `${payload.firstName} ${payload.lastName}`],
-      ['Email', payload.email],
-      ['Empresa', payload.company],
-      ['Tamano del equipo de ventas', payload.teamSize],
-    ])}
+    ${buildEmailDetailTable(details)}
     ${buildEmailButton('Responder al lead', buildMailtoHref(payload.email, `Re: ${subject}`))}
   `,
 })}`;
