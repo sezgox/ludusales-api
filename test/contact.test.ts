@@ -169,14 +169,16 @@ describe('contact endpoint', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         firstName: 'Ana Pérez', lastName: '', email: 'ana@example.com', company: 'Empresa',
-        teamSize: '8 a 25', role: 'Directora', phone: '600123456', goals: ['Captar nuevos clientes'],
+        teamSize: '8 a 25', role: 'Directora', phone: '600123456', goals: ['Captar nuevos clientes', 'Activar a todo el equipo'],
         founderInterest: 'Solo quiero información', source: 'LinkedIn', message: '<texto de prueba>',
       }),
     }, baseEnv);
     expect(response.status).toBe(200);
     const body = JSON.parse(String(resendFetch.mock.calls[0][1]?.body)) as { text: string; html: string };
-    expect(body.text).toContain('Cargo: Directora');
-    expect(body.text).toContain('Objetivos: Captar nuevos clientes');
+    for (const value of ['Ana Pérez', 'ana@example.com', 'Empresa', '8 a 25', 'Directora', '600123456', 'Captar nuevos clientes', 'Activar a todo el equipo', 'Solo quiero información', 'LinkedIn']) {
+      expect(body.text).toContain(value);
+      expect(body.html).toContain(value);
+    }
     expect(body.text).toContain('Mensaje: <texto de prueba>');
     expect(body.html).toContain('&lt;texto de prueba&gt;');
   });
