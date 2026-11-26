@@ -32,5 +32,39 @@
 		"RESEND_FROM_EMAIL": "Ludus Sales <juan.mateo@ludusales.com>",
 		"FRONTEND_ORIGINS": "https://ludusales.com,https://www.ludusales.com,http://localhost:4200",
 		"ASSET_BASE_URL": "https://assets.ludusales.com"
+	},
+	"env": {
+		"staging": {
+			"name": "ludusales-api-staging",
+			"workers_dev": false,
+			"preview_urls": false,
+			"routes": [],
+			"d1_databases": [
+				{
+					"binding": "DB",
+					"database_name": "ludusales-db-staging",
+					"migrations_dir": "migrations"
+				}
+			],
+			"r2_buckets": [
+				{
+					"binding": "MEDIA_BUCKET",
+					"bucket_name": "ludusales-images-staging"
+				}
+			],
+			"images": {
+				"binding": "IMAGES"
+			},
+			"triggers": {
+				"crons": ["*/5 * * * *"]
+			},
+			"vars": {
+				"CONTACT_TO_EMAIL": "juan.mateo+integracion@ludusales.com",
+				"CONTACT_EMAIL_OVERRIDE": "juan.mateo+integracion@ludusales.com",
+				"RESEND_FROM_EMAIL": "Ludus Sales Integración <juan.mateo@ludusales.com>",
+				"FRONTEND_ORIGINS": "https://integracion.ludusales.com",
+				"ASSET_BASE_URL": "https://integracion.ludusales.com/api/media"
+			}
+		}
 	}
 }

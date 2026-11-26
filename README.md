@@ -14,6 +14,8 @@ El backend usa Cloudflare D1 con Drizzle ORM para los modelos mínimos de autent
 - `prizes`: premios ordenados asociados a una gamificación.
 - `participants`: perfiles reutilizables por empresa, con código único y foto compartida.
 - `rankings`: relación participante–gamificación, score y valores dinámicos por fila; la posición se calcula al consultar.
+- `data_updates` y `participant_results`: publicaciones del ranking y resultados por participante. Cada actualización guarda una versión y conserva el histórico.
+- `blog_posts`: artículos públicos en español e inglés. La migración inicial carga los cuatro artículos del sitio.
 - `media_deletion_queue`: limpieza reintentable de objetos sustituidos o eliminados de R2.
 
 Los importes se reciben y devuelven como strings decimales. D1 guarda enteros escalados usando
@@ -38,7 +40,14 @@ dashboard con datos como el estado vacío desde superuser y desde cada cuenta de
 
 Los códigos se guardan en DB como `access_code_hash`, no en claro. No guardes usuarios reales ni códigos reales en seeds versionados.
 
+`npm run db:seed:portal` añade una empresa local independiente con los participantes del prototipo. Su código de prueba es `PORTAL-DEMO-2026`. Ejecuta las migraciones locales antes de cargarla.
+
+Con el Worker local en marcha, `npm run db:seed:portal-master` configura la demo y publica tres actualizaciones de ejemplo aplicando las mismas reglas que el Excel maestro. La última sitúa a Marta Ruiz en el puesto 6 con 278 puntos.
+
 ## Endpoints
+
+- `GET /blog` devuelve el listado de artículos publicados con el destacado primero.
+- `GET /blog/:slug` devuelve un artículo publicado. Los artículos programados y sin fecha de publicación devuelven 404.
 
 ### `POST /auth/login`
 
@@ -85,8 +94,12 @@ Lecturas autenticadas:
 
 - `GET /companies/:companyPublicId/gamifications`
 - `GET /companies/:companyPublicId/gamifications/:gamificationPublicId`
+- `GET /companies/:companyPublicId/gamifications/:gamificationPublicId/ranking/:participantCode/history`
 
 Una cuenta de empresa solo puede consultar su propia empresa. Un `superuser` puede consultar todas.
+Los borradores solo se devuelven a superusuarios.
+
+`GET /companies/:companyPublicId/history` reúne los podios y récords de los retos finalizados. El detalle de cada reto incluye el resultado publicado del cálculo y aplica sus opciones de privacidad.
 Todas las operaciones bajo `/superuser` exigen rol `superuser`:
 
 - `POST /superuser/companies/:companyPublicId/gamifications`
@@ -100,6 +113,14 @@ Todas las operaciones bajo `/superuser` exigen rol `superuser`:
 - `PUT /superuser/gamifications/:gamificationPublicId/ranking` para reemplazo completo mediante `fieldHeaders` y entradas con `participantCode`, `fullName`, `score` y `customFields` opcional.
 - `PUT|DELETE /superuser/gamifications/:gamificationPublicId/ranking/:participantCode` para cambios individuales.
 - `PUT|DELETE /superuser/gamifications/:gamificationPublicId/ranking/:participantCode/picture` para foto de perfil compartida por empresa.
+- `GET /superuser/gamifications/:gamificationPublicId/ranking-publications` para consultar las versiones.
+- `POST /superuser/gamifications/:gamificationPublicId/ranking-publications/:publicationId/revert` restaura la versión anterior a la última publicación.
+- `GET|PUT /superuser/gamifications/:gamificationPublicId/challenge-settings` para métricas, mapeo, reglas, elegibilidad, misiones, insignias, enfrentamientos y privacidad.
+- `GET /superuser/gamifications/:gamificationPublicId/challenge-members` y `PUT /superuser/gamifications/:gamificationPublicId/challenge-members/:code` para participantes y bajas.
+- `POST /superuser/gamifications/:gamificationPublicId/master-preview` valida los datos de la hoja y devuelve el ranking previsto y los avisos. `POST /superuser/gamifications/:gamificationPublicId/master-publications` exige el identificador de esa vista previa y, desde el admin, archiva el Excel original validado.
+- `GET /superuser/gamifications/:gamificationPublicId/ranking-publications/:publicationId/workbook` descarga el Excel original de una publicación, incluidas las revertidas.
+- `POST /superuser/prizes/:prizePublicId/confirm` confirma ganadores tras el cierre del reto. Para premios de tipo sorteo, registra una sola extracción entre los elegibles de la publicación final.
+- `POST|DELETE /superuser/gamifications/:gamificationPublicId/tv-link` renueva o revoca el token. `POST /tv/read` recibe el token y devuelve solamente los datos de pantalla de ese reto.
 
 Ejemplo de creación:
 

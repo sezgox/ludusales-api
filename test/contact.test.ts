@@ -159,6 +159,33 @@ describe('contact endpoint', () => {
     );
   });
 
+  it('redirects both integration emails and their replies to the test inbox', async () => {
+    const inbox = 'juan.mateo+integracion@ludusales.com';
+    const resendFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const email = JSON.parse(String(init?.body));
+      expect(email.to).toEqual([inbox]);
+      expect(email.reply_to).toBe(inbox);
+      expect(email.subject).toMatch(/^\[Integración\] /);
+      return new Response(JSON.stringify({ id: 'email-id' }));
+    });
+    vi.stubGlobal('fetch', resendFetch);
+
+    const response = await app.request('/contact', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        firstName: 'Codex',
+        lastName: 'Test',
+        email: 'external@example.com',
+        company: 'Ludus Sales Test',
+        teamSize: '1',
+      }),
+    }, { ...baseEnv, CONTACT_EMAIL_OVERRIDE: inbox });
+
+    expect(response.status).toBe(200);
+    expect(resendFetch).toHaveBeenCalledTimes(2);
+  });
+
   it('includes the expanded contact details in the owner notification', async () => {
     const resendFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       new Response(JSON.stringify({ id: 'email-id' }), { status: 200 }),

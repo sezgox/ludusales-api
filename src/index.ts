@@ -5,6 +5,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1';
 import * as schema from './db/schema';
 import { companies, users } from './db/schema';
+import { registerBlogRoutes } from './blog';
 import { registerGamificationRoutes, runGamificationMaintenance } from './gamifications';
 
 type ContactPayload = {
@@ -813,9 +814,11 @@ const sendContactEmail = (emailBody: ResendEmailBody, apiKey: string): Promise<R
   });
 
 const buildContactNotificationEmail = (payload: ContactPayload, env: Env): ResendEmailBody => {
-  const toEmail = env.CONTACT_TO_EMAIL ?? defaultContactEmail;
+  const override = env.CONTACT_EMAIL_OVERRIDE;
+  const toEmail = override ?? env.CONTACT_TO_EMAIL ?? defaultContactEmail;
+  const replyTo = override ?? payload.email;
   const fromEmail = env.RESEND_FROM_EMAIL ?? `Ludus Sales <${defaultContactEmail}>`;
-  const subject = `Nueva solicitud de llamada - ${payload.company}`;
+  const subject = `${override ? '[Integración] ' : ''}Nueva solicitud de llamada - ${payload.company}`;
   const fullName = [payload.firstName, payload.lastName].filter(Boolean).join(' ');
   const details: [string, string][] = [
     ['Nombre', fullName],
@@ -837,14 +840,14 @@ ${buildEmailShell({
   lead: 'Han completado el formulario de contacto. Responde directamente a este correo para continuar la conversacion.',
   content: `
     ${buildEmailDetailTable(details)}
-    ${buildEmailButton('Responder al lead', buildMailtoHref(payload.email, `Re: ${subject}`))}
+    ${buildEmailButton('Responder al lead', buildMailtoHref(replyTo, `Re: ${subject}`))}
   `,
 })}`;
 
   return {
     from: fromEmail,
     to: [toEmail],
-    reply_to: payload.email,
+    reply_to: replyTo,
     subject,
     text,
     html,
@@ -852,10 +855,11 @@ ${buildEmailShell({
 };
 
 const buildContactConfirmationEmail = (payload: ContactPayload, env: Env): ResendEmailBody => {
-  const contactEmail = env.CONTACT_TO_EMAIL ?? defaultContactEmail;
+  const override = env.CONTACT_EMAIL_OVERRIDE;
+  const contactEmail = override ?? env.CONTACT_TO_EMAIL ?? defaultContactEmail;
   const fromEmail = env.RESEND_FROM_EMAIL ?? `Ludus Sales <${defaultContactEmail}>`;
   const firstName = payload.firstName;
-  const subject = 'Hemos recibido tu solicitud en Ludus Sales';
+  const subject = `${override ? '[Integración] ' : ''}Hemos recibido tu solicitud en Ludus Sales`;
   const text = [
     `Hola ${firstName},`,
     '',
@@ -888,7 +892,7 @@ ${buildEmailShell({
 
   return {
     from: fromEmail,
-    to: [payload.email],
+    to: [override ?? payload.email],
     reply_to: contactEmail,
     subject,
     text,
@@ -1012,6 +1016,7 @@ const escapeHtml = (value: string): string =>
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
+registerBlogRoutes(app);
 registerGamificationRoutes(app, readAuthenticatedPrincipal, canAccessCompany);
 
 const worker = Object.assign(app, {

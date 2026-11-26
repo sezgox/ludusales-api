@@ -12,10 +12,13 @@
     "dev": "wrangler dev",
     "db:migrate:local": "wrangler d1 migrations apply ludusales-db --local",
     "db:seed:local": "wrangler d1 execute ludusales-db --local --file=./seed/local.sql",
+    "db:seed:portal": "wrangler d1 execute ludusales-db --local --file=./seed/portal-demo.sql",
+    "db:seed:portal-master": "node ./seed/portal-demo-calculations.mjs",
     "db:reset:local": "npm run db:migrate:local && npm run db:seed:local",
     "db:migrate:remote": "wrangler d1 migrations apply ludusales-db --remote",
     "db:seed:remote": "wrangler d1 execute ludusales-db --remote --file=./seed/production.sql",
     "deploy": "wrangler deploy",
+    "deploy:staging": "node ./scripts/deploy-staging.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "npm run typecheck && npm test"

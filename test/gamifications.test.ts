@@ -119,6 +119,10 @@ describe('gamification API', () => {
     });
     expect(missingTitle.status).toBe(400);
 
+    const ownDraft = await request(`/companies/${demoCompanyId}/gamifications/${created.publicId}`, companyCookie);
+    expect(ownDraft.status).toBe(404);
+    const activation = await request(`/superuser/gamifications/${created.publicId}/activate`, superuserCookie, { method: 'POST' });
+    expect(activation.status).toBe(200);
     const ownRead = await request(`/companies/${demoCompanyId}/gamifications`, companyCookie);
     expect(ownRead.status).toBe(200);
     const ownBody = (await ownRead.json()) as { gamifications: Array<{ publicId: string }> };
@@ -133,19 +137,138 @@ describe('gamification API', () => {
     const gamification = await createGamification(cookie, demoCompanyId, 'Live limit');
     const detail = await request(`/companies/${demoCompanyId}/gamifications/${gamification.publicId}`, cookie);
     expect(((await detail.json()) as { gamification: { maxLiveRanking: number; rankingUnit: string } }).gamification)
-      .toMatchObject({ maxLiveRanking: 5, rankingUnit: 'Ludu Points' });
+      .toMatchObject({ maxLiveRanking: 5, rankingUnit: 'Ludu Points', tvEnabled: false });
 
     const updated = await request(`/superuser/gamifications/${gamification.publicId}`, cookie, {
-      method: 'PATCH', json: { maxLiveRanking: 7, rankingUnit: 'Créditos' },
+      method: 'PATCH', json: { maxLiveRanking: 7, rankingUnit: 'Créditos', tvEnabled: true },
     });
     expect(updated.status).toBe(200);
     expect(((await updated.json()) as { gamification: { maxLiveRanking: number; rankingUnit: string } }).gamification)
-      .toMatchObject({ maxLiveRanking: 7, rankingUnit: 'Créditos' });
+      .toMatchObject({ maxLiveRanking: 7, rankingUnit: 'Créditos', tvEnabled: true });
 
     const invalid = await request(`/superuser/gamifications/${gamification.publicId}`, cookie, {
       method: 'PATCH', json: { maxLiveRanking: 2 },
     });
     expect(invalid.status).toBe(400);
+  });
+
+  it('records immutable ranking results, shows movement, and atomically restores a previous publication', async () => {
+    const owner = await login('OWNER-LOCAL-2026');
+    const company = await login('DEMO-ACCESS-2026');
+    const created = await createGamification(owner, demoCompanyId, 'Publicaciones');
+    const readPath = `/companies/${demoCompanyId}/gamifications/${created.publicId}`;
+    const managePath = `/superuser/gamifications/${created.publicId}`;
+    expect((await request(`${managePath}/activate`, owner, { method: 'POST' })).status).toBe(200);
+
+    const publish = async (alice: string, bob: string) => request(`${managePath}/ranking`, owner, {
+      method: 'PUT', json: { fieldHeaders: ['Zona'], entries: [
+        { participantCode: 'snap-alice', fullName: 'Alicia', score: alice, customFields: { Zona: 'Sur' } },
+        { participantCode: 'snap-bob', fullName: 'Roberto', score: bob, customFields: { Zona: 'Norte' } },
+      ] },
+    });
+    expect((await publish('10.00', '7.25')).status).toBe(200);
+    expect((await publish('9.95', '12.50')).status).toBe(200);
+
+    const detail = await (await request(readPath, company)).json() as { gamification: { ranking: unknown[]; rankingTotal: string } };
+    expect(detail.gamification.rankingTotal).toBe('22.45');
+    expect(detail.gamification.ranking).toMatchObject([
+      { participantCode: 'snap-bob', position: 1, positionChange: 1, scoreChange: '5.25' },
+      { participantCode: 'snap-alice', position: 2, positionChange: -1, scoreChange: '-0.05' },
+    ]);
+    const evolution = await (await request(`${readPath}/ranking/snap-alice/history`, company)).json() as { history: unknown[] };
+    expect(evolution.history).toMatchObject([{ position: 1, score: '10.00' }, { position: 2, score: '9.95' }]);
+
+    const publications = await (await request(`${managePath}/ranking-publications`, owner)).json() as { publications: Array<{ publicId: string }> };
+    const [latest, previous] = publications.publications;
+    expect((await request(`${managePath}/ranking-publications/${latest!.publicId}/revert`, company, { method: 'POST' })).status).toBe(403);
+    expect((await request(`${managePath}/ranking-publications/${previous!.publicId}/revert`, owner, { method: 'POST' })).status).toBe(409);
+    const attempts = await Promise.all([1, 2].map(() => request(`${managePath}/ranking-publications/${latest!.publicId}/revert`, owner, { method: 'POST' })));
+    expect(attempts.map((response) => response.status).sort()).toEqual([200, 409]);
+    const restored = await (await request(readPath, company)).json() as { gamification: { ranking: unknown[]; rankingTotal: string } };
+    expect(restored.gamification.rankingTotal).toBe('17.25');
+    expect(restored.gamification.ranking).toMatchObject([
+      { participantCode: 'snap-alice', position: 1, positionChange: null, customFields: { Zona: 'Sur' } },
+      { participantCode: 'snap-bob', position: 2, positionChange: null, customFields: { Zona: 'Norte' } },
+    ]);
+  });
+
+  it('publishes the validated master spreadsheet once and projects only permitted data to the company and TV', async () => {
+    const owner = await login('OWNER-LOCAL-2026');
+    const company = await login('DEMO-ACCESS-2026');
+    const today = new Date().toISOString().slice(0, 10);
+    const after = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+    const create = await request(`/superuser/companies/${demoCompanyId}/gamifications`, owner, {
+      method: 'POST', json: { ...gamificationPayload('Maestro'), startAt: today, endAt: after, tvEnabled: true },
+    });
+    const { gamification } = await create.json() as { gamification: { publicId: string } };
+    const admin = `/superuser/gamifications/${gamification.publicId}`;
+    const portal = `/companies/${demoCompanyId}/gamifications/${gamification.publicId}`;
+    expect((await request(`${admin}/activate`, owner, { method: 'POST' })).status).toBe(200);
+    expect((await request(`${admin}/challenge-members/master-a`, owner, { method: 'PUT', json: { fullName: 'Nombre Privado', zone: 'Norte', active: true } })).status).toBe(200);
+    const settings = { metrics: [{ key: 'importe', label: 'Importe privado', kind: 'sum', integer: false }],
+      rules: [{ metric: 'importe', label: 'Puntuación', rate: 1 }], hiddenMetrics: ['importe'], anonymousFrom: 1 };
+    expect((await request(`${admin}/challenge-settings`, owner, { method: 'PUT', json: settings })).status).toBe(200);
+    const input = { mode: 'accumulated', sourceName: 'test.xlsx', headers: ['id_participante', 'nombre', 'fecha_datos', 'importe'],
+      rows: [{ id_participante: 'master-a', nombre: 'Nombre Privado', fecha_datos: today, importe: 125.5 }] };
+    const preview = async () => {
+      const response = await request(`${admin}/master-preview`, owner, { method: 'POST', json: { input } });
+      expect(response.status).toBe(200);
+      const data = await response.json() as { previewToken: string; entries: unknown[] };
+      expect(data.entries).toMatchObject([{ code: 'master-a', score: 125.5, position: 1 }]);
+      return data.previewToken;
+    };
+    const publish = (previewToken: string) => request(`${admin}/master-publications`, owner, { method: 'POST', json: { input, previewToken } });
+    const stale = await preview();
+    expect((await request(`${admin}/challenge-settings`, owner, { method: 'PUT', json: { ...settings, showPhotos: false } })).status).toBe(200);
+    expect((await publish(stale)).status).toBe(409);
+    const current = await preview();
+    expect((await publish(current)).status).toBe(201);
+    expect((await publish(current)).status).toBe(200);
+    expect((await request(`${admin}/master-preview`, company, { method: 'POST', json: { input } })).status).toBe(403);
+
+    const visible = await (await request(portal, company)).json() as { gamification: { ranking: unknown[]; rankingFieldHeaders: string[] } };
+    expect(visible.gamification.ranking).toMatchObject([{ fullName: 'Participante 1', score: '125.50', customFields: { Zona: 'Norte' }, pictureUrl: null }]);
+    expect(JSON.stringify(visible.gamification.ranking)).not.toContain('Importe privado');
+    expect(visible.gamification.rankingFieldHeaders).not.toContain('Importe privado');
+
+    const generated = await request(`${admin}/tv-link`, owner, { method: 'POST' });
+    expect(generated.status).toBe(201);
+    const { token } = (await generated.json()) as { token: string };
+    const tv = await app.request('/tv/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) }, testEnv);
+    expect(tv.headers.get('cache-control')).toBe('no-store');
+    expect(await tv.json()).toMatchObject({ ranking: [{ name: 'Participante 1', position: 1, score: 125.5 }] });
+    expect((await request(`${admin}/tv-link`, owner, { method: 'DELETE' })).status).toBe(200);
+    expect((await app.request('/tv/read', { method: 'POST', body: JSON.stringify({ token }) }, testEnv)).status).toBe(404);
+
+    const workbook = Uint8Array.from([80, 75, 3, 4, 10, 20, 30]);
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', workbook));
+    const sourceHash = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    const withArchive = { ...input, sourceHash };
+    const beforeArchive = await request(`${admin}/master-preview`, owner, { method: 'POST', json: { input: withArchive } });
+    expect(beforeArchive.status).toBe(200);
+    const { previewToken } = (await beforeArchive.json()) as { previewToken: string };
+    const form = new FormData();
+    form.set('payload', JSON.stringify({ input: withArchive, previewToken }));
+    form.set('workbook', new File([workbook], input.sourceName));
+    const archived = await app.request(`${admin}/master-publications`, { method: 'POST', headers: { Cookie: owner }, body: form }, testEnv);
+    expect(archived.status).toBe(201);
+    const { publicId } = (await archived.json()) as { publicId: string };
+    const download = `${admin}/ranking-publications/${publicId}/workbook`;
+    expect((await request(download, company)).status).toBe(403);
+    expect(new Uint8Array(await (await request(download, owner)).arrayBuffer())).toEqual(workbook);
+
+    const prize = await request(`${admin}/prizes`, owner, { method: 'POST', json: { name: 'Sorteo', kind: 'raffle', rankingPosition: null } });
+    expect(prize.status).toBe(201);
+    const { prize: draw } = (await prize.json()) as { prize: { publicId: string; rankingPosition: number | null } };
+    expect(draw.rankingPosition).toBeNull();
+    const drawPath = `/superuser/prizes/${draw.publicId}/confirm`;
+    expect((await request(drawPath, owner, { method: 'POST' })).status).toBe(409);
+    expect((await request(`${admin}/deactivate`, owner, { method: 'POST' })).status).toBe(200);
+    const attempts = await Promise.all([1, 2].map(() => request(drawPath, owner, { method: 'POST' })));
+    expect(attempts.map(({ status }) => status)).toEqual([200, 200]);
+    const confirmed = await (await request(portal, company)).json() as { gamification: { prizes: unknown[] } };
+    expect(confirmed.gamification.prizes).toMatchObject([{ kind: 'raffle', winners: ['Participante 1'] }]);
+    expect(await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM prize_decisions WHERE prize_public_id = ?').bind(draw.publicId).first()).toMatchObject({ count: 1 });
   });
 
   it('stores ordered rules and closes gamifications without a goal as not applicable', async () => {
@@ -194,7 +317,7 @@ describe('gamification API', () => {
     const prize = ((await created.json()) as { prize: { publicId: string; rankingPosition: number; estimatedValue: number | null } }).prize;
     expect(prize).toEqual({
       publicId: expect.any(String), name: 'Trip', pictureUrl: null, sortOrder: 0, rankingPosition: 1, estimatedValue: 99.95,
-      createdAt: expect.any(String), updatedAt: expect.any(String),
+      createdAt: expect.any(String), updatedAt: expect.any(String), kind: 'position', description: '', parameter: '',
     });
 
     const renamed = await request(`/superuser/prizes/${prize.publicId}`, cookie, { method: 'PATCH', json: { name: 'Trip renamed' } });

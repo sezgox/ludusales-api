@@ -1,5 +1,24 @@
 import { sql } from 'drizzle-orm';
-import { check, index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { check, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+
+export const blogPosts = sqliteTable('blog_posts', {
+  slug: text('slug').primaryKey(),
+  category: text('category').notNull(),
+  categoryEn: text('category_en').notNull(),
+  author: text('author').notNull(),
+  publishedAt: text('published_at'),
+  featured: integer('featured', { mode: 'boolean' }).notNull().default(false),
+  readingMinutes: integer('reading_minutes').notNull(),
+  coverLabel: text('cover_label').notNull(),
+  coverColor: text('cover_color').notNull(),
+  coverStripe: text('cover_stripe').notNull(),
+  title: text('title').notNull(),
+  titleEn: text('title_en').notNull(),
+  excerpt: text('excerpt').notNull(),
+  excerptEn: text('excerpt_en').notNull(),
+  body: text('body').notNull(),
+  bodyEn: text('body_en').notNull(),
+});
 
 export const companies = sqliteTable(
   'companies',
@@ -50,6 +69,7 @@ export const gamifications = sqliteTable(
     goalUnit: text('goal_unit'),
     rankingUnit: text('ranking_unit').notNull().default('Ludu Points'),
     maxLiveRanking: integer('max_live_ranking').notNull().default(5),
+    tvEnabled: integer('tv_enabled', { mode: 'boolean' }).notNull().default(false),
     rankingFieldHeadersJson: text('ranking_field_headers_json').notNull().default('[]'),
     status: text('status', { enum: ['draft', 'active', 'closed'] }).notNull().default('draft'),
     outcome: text('outcome', { enum: ['pending', 'achieved', 'missed', 'not_applicable'] }).notNull().default('pending'),
@@ -160,7 +180,10 @@ export const prizes = sqliteTable(
     name: text('name').notNull(),
     pictureKey: text('picture_key'),
     sortOrder: integer('sort_order').notNull().default(0),
-    rankingPosition: integer('ranking_position').notNull(),
+    rankingPosition: integer('ranking_position'),
+    kind: text('kind', { enum: ['position', 'milestone', 'zone', 'special', 'raffle'] }).notNull().default('position'),
+    description: text('description').notNull().default(''),
+    parameter: text('parameter').notNull().default(''),
     estimatedValueCents: integer('estimated_value_cents'),
     createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -215,6 +238,52 @@ export const participants = sqliteTable(
     index('participants_company_name_idx').on(table.companyId, table.fullName),
   ],
 );
+
+export const dataUpdates = sqliteTable('data_updates', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  publicId: text('public_id').notNull().unique(),
+  gamificationId: integer('gamification_id').notNull().references(() => gamifications.id, { onDelete: 'cascade' }),
+  publishedAt: text('published_at').notNull(),
+  valuePrecision: integer('value_precision').notNull(),
+  fieldHeadersJson: text('field_headers_json').notNull(),
+  status: text('status', { enum: ['published', 'reverted'] }).notNull().default('published'),
+  dataDate: text('data_date'),
+  importMode: text('import_mode', { enum: ['accumulated', 'period'] }),
+  sourceName: text('source_name'),
+  authorPublicId: text('author_public_id'),
+  projectionJson: text('projection_json'),
+  previewToken: text('preview_token'),
+}, (table) => [index('data_updates_gamification_status').on(table.gamificationId, table.status, table.id),
+  uniqueIndex('data_updates_preview_token').on(table.previewToken).where(sql`${table.previewToken} IS NOT NULL`)]);
+
+export const participantResults = sqliteTable('participant_results', {
+  updateId: integer('update_id').notNull().references(() => dataUpdates.id, { onDelete: 'cascade' }),
+  participantId: integer('participant_id').notNull().references(() => participants.id, { onDelete: 'cascade' }),
+  scoreValue: integer('score_value').notNull(),
+  position: integer('position').notNull(),
+  customFieldsJson: text('custom_fields_json').notNull(),
+  calculationJson: text('calculation_json'),
+  sortOrder: integer('sort_order'),
+}, (table) => [primaryKey({ columns: [table.updateId, table.participantId] })]);
+
+export const challengeSettings = sqliteTable('challenge_settings', {
+  gamificationId: integer('gamification_id').primaryKey().references(() => gamifications.id, { onDelete: 'cascade' }),
+  settingsJson: text('settings_json').notNull(),
+  revision: text('revision').notNull(),
+});
+
+export const challengeMembers = sqliteTable('challenge_members', {
+  gamificationId: integer('gamification_id').notNull().references(() => gamifications.id, { onDelete: 'cascade' }),
+  participantId: integer('participant_id').notNull().references(() => participants.id, { onDelete: 'cascade' }),
+  zone: text('zone').notNull().default(''),
+  active: integer('active', { mode: 'boolean' }).notNull().default(true),
+}, (table) => [primaryKey({ columns: [table.gamificationId, table.participantId] })]);
+
+export const challengeTvAccess = sqliteTable('challenge_tv_access', {
+  gamificationId: integer('gamification_id').primaryKey().references(() => gamifications.id, { onDelete: 'cascade' }),
+  tokenHash: text('token_hash').notNull().unique(),
+  createdAt: text('created_at').notNull(),
+});
 
 export const mediaDeletionQueue = sqliteTable('media_deletion_queue', {
   objectKey: text('object_key').primaryKey(),
