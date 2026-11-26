@@ -78,9 +78,10 @@ type AuthenticatedPrincipal =
     };
 
 type D1DatabaseBinding = Parameters<typeof drizzle>[0];
-type AppContext = Context<{ Bindings: Env }>;
+type AppBindings = Env & { CONTACT_EMAIL_OVERRIDE?: string };
+type AppContext = Context<{ Bindings: AppBindings }>;
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: AppBindings }>();
 
 const defaultAllowedOrigins = ['https://ludusales.com', 'https://www.ludusales.com', 'http://localhost:4200'];
 const defaultContactEmail = 'juan.mateo@ludusales.com';
@@ -813,7 +814,7 @@ const sendContactEmail = (emailBody: ResendEmailBody, apiKey: string): Promise<R
     body: JSON.stringify(emailBody),
   });
 
-const buildContactNotificationEmail = (payload: ContactPayload, env: Env): ResendEmailBody => {
+const buildContactNotificationEmail = (payload: ContactPayload, env: AppBindings): ResendEmailBody => {
   const override = env.CONTACT_EMAIL_OVERRIDE;
   const toEmail = override ?? env.CONTACT_TO_EMAIL ?? defaultContactEmail;
   const replyTo = override ?? payload.email;
@@ -854,7 +855,7 @@ ${buildEmailShell({
   };
 };
 
-const buildContactConfirmationEmail = (payload: ContactPayload, env: Env): ResendEmailBody => {
+const buildContactConfirmationEmail = (payload: ContactPayload, env: AppBindings): ResendEmailBody => {
   const override = env.CONTACT_EMAIL_OVERRIDE;
   const contactEmail = override ?? env.CONTACT_TO_EMAIL ?? defaultContactEmail;
   const fromEmail = env.RESEND_FROM_EMAIL ?? `Ludus Sales <${defaultContactEmail}>`;

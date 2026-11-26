@@ -2,14 +2,21 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-const workerName = 'ludusales-api-staging';
+const branch = process.env.WORKERS_CI_BRANCH;
+if (branch && branch !== 'staging') {
+  console.log(`Skipping the integration Preview for branch ${branch}.`);
+  process.exit(0);
+}
+
+const workerName = 'ludusales-api';
 const database = 'ludusales-db-staging';
+const config = 'wrangler.preview.jsonc';
 const wrangler = fileURLToPath(new URL('../node_modules/wrangler/bin/wrangler.js', import.meta.url));
 const root = fileURLToPath(new URL('../', import.meta.url));
 
 const buildWorker = process.env.WRANGLER_CI_OVERRIDE_NAME;
 if (buildWorker && buildWorker !== workerName) {
-  throw new Error(`The integration deploy must target ${workerName}.`);
+  throw new Error(`The integration Preview must target ${workerName}.`);
 }
 
 const adminCode = process.env.STAGING_ADMIN_CODE?.trim();
@@ -18,7 +25,7 @@ if (!adminCode || adminCode.length < 20 || adminCode.length > 80) {
 }
 
 function runWrangler(args, capture = false) {
-  const result = spawnSync(process.execPath, [wrangler, ...args, '--env', 'staging'], {
+  const result = spawnSync(process.execPath, [wrangler, ...args, '--config', config], {
     cwd: root,
     encoding: 'utf8',
     stdio: ['inherit', capture ? 'pipe' : 'inherit', 'inherit'],
@@ -51,4 +58,4 @@ runWrangler([...execute, '--command', `
   WHERE users.access_code_hash <> excluded.access_code_hash;
 `]);
 
-runWrangler(['deploy', '--name', workerName]);
+runWrangler(['preview', '--worker-name', workerName, '--name', 'staging']);
